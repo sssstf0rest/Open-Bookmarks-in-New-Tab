@@ -34,6 +34,12 @@ The extension uses the **"newtab@ prefix" trick** (explained in detail in [this 
 
 ## Installation
 
+### Chrome Web Store
+
+Install directly from the [Chrome Web Store](https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo).
+
+### Manual (Developer Mode)
+
 1. Clone or download this repository
 2. Open Chrome and go to `chrome://extensions/`
 3. Enable **Developer mode** (top-right toggle)
