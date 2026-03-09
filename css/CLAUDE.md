@@ -8,7 +8,4 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #68 | 3:46 PM | ✅ | Bilingual interface changes deployed to GitHub repository | ~237 |
-| #67 | " | ✅ | Chinese language support committed to repository | ~296 |
-| #66 | 3:42 PM | 🟣 | Language switcher styled and positioned in header right corner | ~399 |
-| #59 | 3:39 PM | 🔵 | Popup styling system reviewed for language switcher integration | ~307 |
 </claude-mem-context>
