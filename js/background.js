@@ -3,54 +3,28 @@
  * Open Bookmarks in New Tab — Background Service Worker
  * =============================================================================
  *
- * How it works (the "newtab@" prefix trick):
+ * How it works (webNavigation interception):
  *
- * 1. BOOKMARK REWRITING — On install / enable, every bookmark URL is rewritten
- *    from  https://example.com  →  https://newtab@example.com
- *    The "newtab@" part exploits the URL userinfo field (RFC 3986 §3.2.1).
- *    Browsers ignore it for display and most servers ignore it entirely,
- *    so favicons and titles are preserved.
+ * 1. DETECT — chrome.webNavigation.onCommitted fires for every top-level
+ *    navigation. We check `transitionType === "auto_bookmark"` to identify
+ *    navigations triggered by clicking a bookmark.
  *
- * 2. REDIRECT RULE — A declarativeNetRequest rule (rules.json) matches any
- *    main_frame request whose URL contains "newtab@" and redirects it to
- *    the extension's own empty.zip file. This triggers a download instead
- *    of a page navigation, so the current tab is NEVER touched.
+ * 2. NEW TAB — The bookmark URL is opened in a new tab with the user's
+ *    preferred focus and position settings.
  *
- * 3. DOWNLOAD INTERCEPTION — The chrome.downloads API catches the dummy
- *    empty.zip download as soon as it starts. We immediately cancel it
- *    (no file is saved, no download bar flash) and extract the *original*
- *    bookmark URL from the download's referrer / URL chain.
+ * 3. RESTORE — The original tab is navigated back to its previous page
+ *    via chrome.tabs.goBack(). If there's no history (e.g. the tab was a
+ *    new-tab page), we load the bookmark there instead.
  *
- * 4. NEW TAB — The cleaned URL (without "newtab@") is opened in a new tab
- *    with the user's preferred focus and position settings.
- *
- * 5. DISABLE / UNINSTALL — When the extension is toggled off or uninstalled,
- *    all bookmark URLs are restored to their original form (prefix stripped).
- *
- * Result: The current tab is completely undisturbed — no reload, no flash,
- *         no bfcache dependency. YouTube keeps playing.
+ * No bookmark rewriting. No redirect rules. No dummy downloads.
+ * Bookmarks stay completely clean and unmodified.
  *
  * Permissions:
- *   - bookmarks             → read & rewrite bookmark URLs
- *   - tabs                  → open new tabs, query active tab
- *   - storage               → persist user settings
- *   - downloads             → intercept & cancel dummy downloads
- *   - declarativeNetRequest → redirect newtab@ URLs to empty.zip
- *   - alarms                → keep service worker alive for download listener
- *   - host_permissions <all_urls> → needed by declarativeNetRequest redirect
+ *   - webNavigation  → detect bookmark-triggered navigations
+ *   - tabs           → open new tabs, query active tab, goBack()
+ *   - storage        → persist user settings
  * =============================================================================
  */
-
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-/** The marker username injected into bookmark URLs */
-const NEWTAB_PREFIX = "newtab@";
-
-/** Path to the dummy file that declarativeNetRequest redirects to */
-const EMPTY_ZIP_FILENAME = "empty.zip";
-
-/** Interval (minutes) for the keep-alive alarm */
-const KEEPALIVE_INTERVAL_MIN = 0.5;
 
 // ─── Default Settings ────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
@@ -61,6 +35,15 @@ const DEFAULT_SETTINGS = {
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let settings = { ...DEFAULT_SETTINGS };
+
+/**
+ * Tracks recently created tabs so we can distinguish a normal bookmark click
+ * (which navigates an EXISTING tab) from a Cmd+Click / middle-click bookmark
+ * (which Chrome opens in a NEW tab — we should NOT intercept those).
+ *
+ * Key: tabId, Value: creation timestamp (Date.now())
+ */
+const recentlyCreatedTabs = new Map();
 
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
@@ -92,73 +75,8 @@ async function saveSettings() {
 // ─── URL Helpers ─────────────────────────────────────────────────────────────
 
 /**
- * Returns true if the URL can have the newtab@ prefix added.
- * Only http:// and https:// URLs support the userinfo field.
- * Internal URLs (chrome://, edge://, about:, javascript:, data:, file://)
- * are excluded.
- *
- * @param {string} url
- * @returns {boolean}
- */
-function canPrefixUrl(url) {
-  return /^https?:\/\//i.test(url);
-}
-
-/**
- * Adds the "newtab@" prefix to a URL.
- *   https://example.com → https://newtab@example.com
- *
- * If the URL already has the prefix or is not http(s), returns it unchanged.
- *
- * @param {string} url  The original bookmark URL.
- * @returns {string}    The prefixed URL.
- */
-function addPrefix(url) {
-  if (!canPrefixUrl(url)) return url;
-  if (hasPrefix(url)) return url;
-
-  // Insert "newtab@" right after the "://" scheme separator
-  return url.replace(/^(https?:\/\/)/i, `$1${NEWTAB_PREFIX}`);
-}
-
-/**
- * Removes the "newtab@" prefix from a URL.
- *   https://newtab@example.com → https://example.com
- *
- * @param {string} url  The prefixed URL.
- * @returns {string}    The cleaned URL.
- */
-function removePrefix(url) {
-  return url.replace(
-    new RegExp(`^(https?://)${escapeRegex(NEWTAB_PREFIX)}`, "i"),
-    "$1"
-  );
-}
-
-/**
- * Returns true if the URL already contains the newtab@ prefix.
- *
- * @param {string} url
- * @returns {boolean}
- */
-function hasPrefix(url) {
-  return new RegExp(`^https?://${escapeRegex(NEWTAB_PREFIX)}`, "i").test(url);
-}
-
-/**
- * Escapes special regex characters in a string.
- *
- * @param {string} str
- * @returns {string}
- */
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Returns true if the URL is an empty / new-tab page.
- * When the user clicks a bookmark from such a page, we load the bookmark
- * in that tab instead of opening a new one.
+ * Returns true if the URL is a "blank" page where the bookmark should load
+ * in-place rather than opening a new tab.
  *
  * @param {string|undefined} url
  * @returns {boolean}
@@ -175,353 +93,173 @@ function isNewTabPage(url) {
   );
 }
 
-// ─── Bookmark Rewriting ──────────────────────────────────────────────────────
-
 /**
- * Recursively walks the entire bookmark tree and applies a transform function
- * to every bookmark node that has a URL (i.e. not a folder).
+ * Returns true if the URL is an http(s) URL that we should intercept.
+ * Internal URLs (chrome://, edge://, about:, etc.) are left alone.
  *
- * @param {function(string): string} transformFn  URL → URL transform.
+ * @param {string} url
+ * @returns {boolean}
  */
-async function walkAndTransformBookmarks(transformFn) {
-  const tree = await chrome.bookmarks.getTree();
-  await walkNodes(tree, transformFn);
+function isInterceptableUrl(url) {
+  return /^https?:\/\//i.test(url);
 }
 
-/**
- * Recursively processes bookmark tree nodes.
- *
- * @param {Array} nodes       Array of BookmarkTreeNode objects.
- * @param {function} transformFn  URL → URL transform.
- */
-async function walkNodes(nodes, transformFn) {
-  for (const node of nodes) {
-    // If the node has children, recurse into them (it's a folder)
-    if (node.children) {
-      await walkNodes(node.children, transformFn);
-    }
+// ─── Migration: Clean up old newtab@ prefixes ────────────────────────────────
+// Users upgrading from v2 (the newtab@ prefix approach) may have bookmarks
+// with the "newtab@" marker still in their URLs. We strip them on install.
 
-    // If the node has a URL, apply the transform
-    if (node.url) {
-      const newUrl = transformFn(node.url);
-      if (newUrl !== node.url) {
-        try {
-          await chrome.bookmarks.update(node.id, { url: newUrl });
-        } catch (err) {
-          // Some bookmarks may be read-only (e.g. managed by policy)
-          console.warn(
-            "[Bookmarks→NewTab] Could not update bookmark:",
-            node.title,
-            err
-          );
-        }
+const NEWTAB_PREFIX = "newtab@";
+
+function hasOldPrefix(url) {
+  return new RegExp(`^https?://${NEWTAB_PREFIX}`, "i").test(url);
+}
+
+function removeOldPrefix(url) {
+  return url.replace(new RegExp(`^(https?://)${NEWTAB_PREFIX}`, "i"), "$1");
+}
+
+async function migrateOldBookmarks() {
+  try {
+    const tree = await chrome.bookmarks.getTree();
+    await migrateNodes(tree);
+    console.log("[Bookmarks→NewTab] Migration: cleaned up old newtab@ prefixes.");
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Migration error:", err);
+  }
+}
+
+async function migrateNodes(nodes) {
+  for (const node of nodes) {
+    if (node.children) {
+      await migrateNodes(node.children);
+    }
+    if (node.url && hasOldPrefix(node.url)) {
+      const cleanUrl = removeOldPrefix(node.url);
+      try {
+        await chrome.bookmarks.update(node.id, { url: cleanUrl });
+      } catch (err) {
+        console.warn("[Bookmarks→NewTab] Could not migrate bookmark:", node.title, err);
       }
     }
   }
 }
 
-/**
- * Adds the newtab@ prefix to ALL bookmarks.
- * Called when the extension is installed or enabled.
- */
-async function prefixAllBookmarks() {
-  console.log("[Bookmarks→NewTab] Adding prefix to all bookmarks…");
-  await walkAndTransformBookmarks(addPrefix);
-  console.log("[Bookmarks→NewTab] Prefix added to all bookmarks.");
-}
+// ─── Tab Tracking ────────────────────────────────────────────────────────────
+// When the user Cmd+clicks or middle-clicks a bookmark, Chrome opens it
+// directly in a new tab. The webNavigation.onCommitted event fires in that
+// NEW tab with transitionType "auto_bookmark". We must NOT intercept this
+// (it would open a duplicate tab and break the original).
+//
+// Strategy: track tab creation times. If onCommitted fires in a tab that
+// was created very recently (< 2 seconds), it's a Cmd+Click / middle-click
+// — skip interception.
 
-/**
- * Removes the newtab@ prefix from ALL bookmarks.
- * Called when the extension is disabled or uninstalled.
- */
-async function unprefixAllBookmarks() {
-  console.log("[Bookmarks→NewTab] Removing prefix from all bookmarks…");
-  await walkAndTransformBookmarks(removePrefix);
-  console.log("[Bookmarks→NewTab] Prefix removed from all bookmarks.");
-}
-
-// ─── Bookmark Change Listeners ───────────────────────────────────────────────
-// When the user creates or edits a bookmark while the extension is enabled,
-// we need to add the prefix to the new URL automatically.
-
-/**
- * When a new bookmark is created, add the prefix if the extension is enabled.
- */
-chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
-  if (!settings.enabled) return;
-  if (!bookmark.url) return; // It's a folder
-
-  const prefixed = addPrefix(bookmark.url);
-  if (prefixed !== bookmark.url) {
-    try {
-      await chrome.bookmarks.update(id, { url: prefixed });
-    } catch (err) {
-      console.warn("[Bookmarks→NewTab] Could not prefix new bookmark:", err);
-    }
-  }
+chrome.tabs.onCreated.addListener((tab) => {
+  recentlyCreatedTabs.set(tab.id, Date.now());
 });
 
-/**
- * When a bookmark URL is changed, ensure the prefix is present if enabled.
- * This handles the case where the user edits a bookmark URL manually.
- */
-chrome.bookmarks.onChanged.addListener(async (id, changeInfo) => {
-  if (!settings.enabled) return;
-  if (!changeInfo.url) return;
-
-  // Avoid infinite loop: only update if the prefix is missing
-  if (!hasPrefix(changeInfo.url) && canPrefixUrl(changeInfo.url)) {
-    const prefixed = addPrefix(changeInfo.url);
-    try {
-      await chrome.bookmarks.update(id, { url: prefixed });
-    } catch (err) {
-      console.warn("[Bookmarks→NewTab] Could not re-prefix bookmark:", err);
-    }
-  }
+// Clean up when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  recentlyCreatedTabs.delete(tabId);
 });
 
-// ─── Download Interception ───────────────────────────────────────────────────
+// ─── Core: webNavigation Interception ────────────────────────────────────────
 
 /**
- * The declarativeNetRequest rule redirects any newtab@ URL to empty.zip,
- * which Chrome treats as a download. This listener catches that download
- * the moment it starts, cancels it (no file is saved to disk), extracts
- * the original URL, and opens it in a new tab.
+ * The heart of the extension. Listens for committed navigations with
+ * transitionType "auto_bookmark" (i.e. the user clicked a bookmark).
  *
- * The current tab is completely untouched — no navigation ever happens.
- *
- * IMPORTANT: After a declarativeNetRequest redirect, Chrome may report
- * the download's fields inconsistently across versions:
- *   - downloadItem.url       → could be the original newtab@ URL OR the
- *                               extension's empty.zip URL
- *   - downloadItem.finalUrl  → could be the extension's empty.zip URL
- *   - downloadItem.referrer  → could be the newtab@ URL
- *
- * We check ALL fields to reliably detect our download and extract the
- * original bookmark URL.
+ * When detected:
+ *   1. Open the bookmark URL in a new tab
+ *   2. Restore the original tab via goBack() or leave it if it was empty
  */
-chrome.downloads.onCreated.addListener(async (downloadItem) => {
-  const emptyZipUrl = chrome.runtime.getURL(EMPTY_ZIP_FILENAME);
+chrome.webNavigation.onCommitted.addListener(async (details) => {
+  // Only handle top-level frame navigations
+  if (details.frameId !== 0) return;
 
-  // ── Detect whether this download belongs to us ─────────────────────
-  // Check if any URL field matches our empty.zip or contains newtab@
-  const urlHasPrefix      = hasPrefix(downloadItem.url || "");
-  const finalUrlIsZip     = (downloadItem.finalUrl === emptyZipUrl);
-  const urlIsZip          = (downloadItem.url === emptyZipUrl);
-  const referrerHasPrefix = hasPrefix(downloadItem.referrer || "");
+  // Only act when enabled
+  if (!settings.enabled) return;
 
-  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip || referrerHasPrefix;
-  if (!isOurDownload) return;
+  // Only intercept bookmark-triggered navigations
+  if (details.transitionType !== "auto_bookmark") return;
 
-  // ── Cancel the dummy download immediately ──────────────────────────
-  // No file is saved to disk, and if we're fast enough Chrome won't
-  // flash the download bar at all.
-  try {
-    await chrome.downloads.cancel(downloadItem.id);
-  } catch (err) {
-    console.warn("[Bookmarks→NewTab] Could not cancel download:", err);
-  }
+  const { url, tabId } = details;
 
-  // Erase it from the download history to keep things clean
-  try {
-    await chrome.downloads.erase({ id: downloadItem.id });
-  } catch (err) {
-    // Not critical — just keeps the downloads list tidy
-    console.warn("[Bookmarks→NewTab] Could not erase download:", err);
-  }
+  // Only intercept http(s) URLs — leave chrome://, file://, etc. alone
+  if (!isInterceptableUrl(url)) return;
 
-  // ── Extract the original newtab@ URL ───────────────────────────────
-  // The newtab@ URL may appear in .url, .finalUrl, or .referrer
-  // depending on Chrome's internal handling. We check all of them.
-  let newtabUrl = "";
-  if (urlHasPrefix) {
-    newtabUrl = downloadItem.url;
-  } else if (referrerHasPrefix) {
-    newtabUrl = downloadItem.referrer;
-  } else if (hasPrefix(downloadItem.finalUrl || "")) {
-    newtabUrl = downloadItem.finalUrl;
-  }
-
-  // Strip the newtab@ prefix to get the real destination URL
-  const cleanUrl = newtabUrl ? removePrefix(newtabUrl) : "";
-  if (!cleanUrl) {
-    console.warn(
-      "[Bookmarks→NewTab] Could not extract original URL from download item:",
-      { url: downloadItem.url, finalUrl: downloadItem.finalUrl, referrer: downloadItem.referrer }
-    );
+  // ── Skip if this is a Cmd+Click / middle-click ──────────────────────
+  // These already open in a new tab — intercepting would create duplicates.
+  const createdAt = recentlyCreatedTabs.get(tabId);
+  if (createdAt && (Date.now() - createdAt) < 2000) {
+    recentlyCreatedTabs.delete(tabId);
     return;
   }
+  recentlyCreatedTabs.delete(tabId);
 
-  // ── Open the real URL ───────────────────────────────────────────────
-  // If the active tab is an empty / new-tab page, load the bookmark
-  // there instead of opening yet another tab.
+  // ── Determine how to handle the original tab ────────────────────────
   try {
-    const [activeTab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-
-    if (activeTab && isNewTabPage(activeTab.url)) {
-      // Reuse the empty tab — navigate it to the bookmark URL
-      await chrome.tabs.update(activeTab.id, { url: cleanUrl });
-    } else {
-      // Normal case — open in a new tab
-      let createOptions = {
-        url: cleanUrl,
-        active: settings.focusNewTab,
-      };
-
-      // Determine tab placement
-      if (settings.position === "right" && activeTab) {
-        createOptions.index = activeTab.index + 1;
-      }
-      // "end" is the default — Chrome appends to the end of the tab bar
-
-      await chrome.tabs.create(createOptions);
-    }
-  } catch (err) {
-    console.warn("[Bookmarks→NewTab] Error opening new tab:", err);
-  }
-});
-
-// ─── Fallback: webNavigation Safety Net ──────────────────────────────────────
-// On some browsers (e.g. Edge on Windows) or under certain timing conditions,
-// the declarativeNetRequest redirect rule may not fire. When that happens the
-// browser actually navigates to the newtab@ URL, which breaks sites that use
-// fetch() with relative URLs (the Fetch API spec forbids credentials in URLs).
-//
-// This listener catches any newtab@ page that slips through the redirect rule.
-// It strips the prefix and either:
-//   a) Updates the current tab (if it was the only page, e.g. new-tab origin)
-//   b) Opens the clean URL in a new tab and navigates the original tab back
-
-chrome.webNavigation.onCommitted.addListener(async (details) => {
-  // Only act on top-level frame navigations
-  if (details.frameId !== 0) return;
-  if (!settings.enabled) return;
-
-  // Only handle URLs that still contain our newtab@ prefix
-  // (means the declarativeNetRequest rule did NOT redirect it)
-  if (!hasPrefix(details.url)) return;
-
-  const cleanUrl = removePrefix(details.url);
-  const tabId = details.tabId;
-
-  try {
-    // Check how many entries the tab has in its history.
-    // If it only has 1 entry (the newtab@ URL itself), it was a new tab
-    // or single-page tab — just update it in place.
     const tab = await chrome.tabs.get(tabId);
 
-    // Determine if this tab was essentially empty before the bookmark click.
-    // A tab with no prior history (e.g. opened from new-tab page) can be
-    // reused. We detect this by checking navigation entry count via the
-    // transitionType — "typed" or "auto_bookmark" from a new tab typically
-    // means the tab has no meaningful prior page.
-    const isFromNewTab = (
-      details.transitionType === "auto_bookmark" ||
-      details.transitionType === "typed"
-    );
+    // If the tab was a new-tab / blank page, just let the bookmark load
+    // there — no need to open another tab.
+    // We check the tab's previous URL from its navigation history.
+    // Since onCommitted already fired, the tab is now showing the bookmark URL.
+    // We need to check if there's a meaningful page to go back to.
 
-    // Try to detect if the tab had real content before.
-    // If the tab's history only contains the newtab@ URL, reuse it.
-    // Otherwise, open a new tab and go back.
-    if (isFromNewTab && (!tab.openerTabId || isNewTabPage(tab.pendingUrl))) {
-      // Simple case: just replace the newtab@ URL with the clean URL
-      await chrome.tabs.update(tabId, { url: cleanUrl });
-    } else {
-      // Open clean URL in a new tab
-      let createOptions = {
-        url: cleanUrl,
-        active: settings.focusNewTab,
-      };
-      if (settings.position === "right") {
-        createOptions.index = tab.index + 1;
-      }
-      await chrome.tabs.create(createOptions);
+    // Use a heuristic: try goBack(). If the tab had no prior history,
+    // goBack() will fail (or navigate to an empty state). In that case,
+    // we don't open a new tab — the bookmark just loads in the current tab.
+    // But if there IS history, we open in a new tab and restore.
 
-      // Navigate the original tab back to restore its previous page
-      try {
-        await chrome.tabs.goBack(tabId);
-      } catch (err) {
-        // goBack may fail if there's no history — just update to new-tab
-        await chrome.tabs.update(tabId, { url: "chrome://newtab" });
-      }
+    // First, check if we can detect a "new tab" scenario.
+    // When a user clicks a bookmark from a new-tab page, there may be
+    // only one entry in the tab's history (the bookmark URL itself).
+    // We detect this using chrome.history.state or by checking the
+    // navigation transition qualifiers.
+
+    // Simpler approach: try to get the tab info before navigation.
+    // Since onCommitted already fired, we check if going back is meaningful
+    // by looking at transitionQualifiers.
+    const qualifiers = details.transitionQualifiers || [];
+    const isFromAddressBar = qualifiers.includes("from_address_bar");
+
+    // If the bookmark was clicked from the new-tab page's address/omnibox,
+    // the tab likely has no meaningful prior page — let it load in place.
+    if (isFromAddressBar) return;
+
+    // ── Open URL in a new tab ───────────────────────────────────────
+    const createOptions = {
+      url: url,
+      active: settings.focusNewTab,
+    };
+
+    if (settings.position === "right") {
+      createOptions.index = tab.index + 1;
+    }
+
+    await chrome.tabs.create(createOptions);
+
+    // ── Restore the original tab ────────────────────────────────────
+    try {
+      await chrome.tabs.goBack(tabId);
+    } catch (backErr) {
+      // goBack() failed — no history. Navigate to new-tab page.
+      await chrome.tabs.update(tabId, { url: "chrome://newtab" });
     }
   } catch (err) {
-    console.warn("[Bookmarks→NewTab] Fallback handler error:", err);
+    console.warn("[Bookmarks→NewTab] Error handling bookmark click:", err);
   }
 });
 
-// ─── Keep-Alive Alarm ────────────────────────────────────────────────────────
-// Chrome MV3 service workers can be terminated after ~30 seconds of
-// inactivity. The downloads.onCreated listener must be active to catch the
-// dummy download, so we use a periodic alarm to keep the worker alive.
-
-/**
- * Set up a repeating alarm that fires every 30 seconds.
- * The alarm handler itself does nothing — its purpose is simply to
- * wake / keep alive the service worker.
- */
-async function setupKeepAlive() {
-  await chrome.alarms.create("keepAlive", {
-    periodInMinutes: KEEPALIVE_INTERVAL_MIN,
-  });
-}
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "keepAlive") {
-    // No-op — the alarm's purpose is just to keep the service worker alive
-    // so that the downloads.onCreated listener is ready.
-  }
-});
-
-// ─── Enable / Disable Logic ─────────────────────────────────────────────────
-
-/**
- * Activates the extension: prefixes all bookmarks and enables the
- * declarativeNetRequest redirect rule.
- */
-async function enableExtension() {
-  // Enable the redirect rule
-  await chrome.declarativeNetRequest.updateEnabledRulesets({
-    enableRulesetIds: ["newtab_redirect"],
-  });
-
-  // Add prefix to all bookmarks
-  await prefixAllBookmarks();
-
-  // Start the keep-alive alarm
-  await setupKeepAlive();
-}
-
-/**
- * Deactivates the extension: strips the prefix from all bookmarks and
- * disables the redirect rule.
- */
-async function disableExtension() {
-  // Remove prefix from all bookmarks first (so they work normally)
-  await unprefixAllBookmarks();
-
-  // Disable the redirect rule
-  await chrome.declarativeNetRequest.updateEnabledRulesets({
-    disableRulesetIds: ["newtab_redirect"],
-  });
-
-  // Stop the keep-alive alarm
-  await chrome.alarms.clear("keepAlive");
-}
-
-// ─── Message Listener (Popup ↔ Background Communication) ────────────────────
+// ─── Message Listener (Popup <-> Background Communication) ───────────────────
 
 /**
  * Handles messages from the popup UI for reading/writing settings.
  *
  * Supported message types:
  *   - { type: "getSettings" }           → returns current settings
- *   - { type: "updateSettings", data }  → merges data into settings and
- *                                          triggers enable/disable if the
- *                                          "enabled" flag changed
+ *   - { type: "updateSettings", data }  → merges data into settings
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "getSettings") {
@@ -530,19 +268,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "updateSettings") {
-    const previousEnabled = settings.enabled;
     settings = { ...settings, ...message.data };
     saveSettings();
-
-    // If the enabled state changed, toggle bookmark prefixing
-    if ("enabled" in message.data && message.data.enabled !== previousEnabled) {
-      if (message.data.enabled) {
-        enableExtension();
-      } else {
-        disableExtension();
-      }
-    }
-
     sendResponse({ settings });
     return true;
   }
@@ -561,15 +288,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 /**
  * Runs when the extension is installed or updated.
- * On fresh install: prefix all bookmarks.
- * On update: re-prefix to catch any bookmarks added while the extension
- *            was not running.
+ * On update from v2: cleans up old newtab@ prefixes in bookmarks.
  */
 chrome.runtime.onInstalled.addListener(async (details) => {
   await loadSettings();
 
-  if (settings.enabled) {
-    await enableExtension();
+  // Migration: strip old newtab@ prefixes from bookmarks (v2 → v3 upgrade)
+  if (details.reason === "update") {
+    await migrateOldBookmarks();
   }
 
   console.log(
@@ -578,28 +304,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   );
 });
 
-/**
- * Runs when the extension is about to be uninstalled (if supported).
- * Clean up all bookmark URLs by removing the prefix.
- *
- * Note: chrome.runtime.setUninstallURL is used for the cleanup page;
- * the actual cleanup happens in the "suspend" or via onInstalled on
- * re-install. As a safeguard, we also clean up on disable.
- */
-
 // ─── Initialization (Service Worker Startup) ─────────────────────────────────
-// This runs every time the service worker starts (which can happen multiple
-// times due to Chrome's MV3 lifecycle). We reload settings and ensure the
-// keep-alive alarm is running.
 
 async function init() {
   await loadSettings();
-
-  if (settings.enabled) {
-    // Ensure keep-alive alarm is active (it may have been cleared if the
-    // service worker was terminated and restarted)
-    await setupKeepAlive();
-  }
 }
 
 init();

@@ -1,38 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Open Bookmarks in New Tab",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Automatically opens clicked bookmarks in a new tab, preserving your current page.",
   "permissions": [
     "bookmarks",
     "tabs",
     "storage",
-    "downloads",
-    "declarativeNetRequest",
-    "alarms",
     "webNavigation"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ],
   "background": {
     "service_worker": "js/background.js"
   },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "newtab_redirect",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["empty.zip"],
-      "matches": ["<all_urls>"]
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

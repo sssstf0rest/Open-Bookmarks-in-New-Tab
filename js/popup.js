@@ -8,8 +8,7 @@
  *   - Bind UI controls (toggle, select) to settings updates
  *   - Persist changes through chrome.runtime messages
  *   - Update visual state (status text, disabled sections) reactively
- *   - Show a brief loading indicator when toggling enabled/disabled,
- *     because the background worker needs time to rewrite all bookmarks
+ *   - Toggle enabled/disabled state instantly (no bookmark rewriting needed)
  *
  * All DOM access is wrapped in DOMContentLoaded for safety, although
  * the <script> tag is placed at the end of <body>.
@@ -147,29 +146,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /**
    * Main on/off toggle.
-   * Toggling enabled/disabled triggers a full bookmark rewrite in the
-   * background, so we show a brief busy state and disable the toggle
-   * to prevent rapid clicking.
+   * Enable/disable is instant — just flips a flag in the background worker.
    */
   enabledToggle.addEventListener("change", async () => {
     const isEnabled = enabledToggle.checked;
-
-    // Disable toggle while bookmarks are being rewritten
-    enabledToggle.disabled = true;
-    updateVisualState(isEnabled, true);
+    updateVisualState(isEnabled);
 
     try {
       await updateSetting({ enabled: isEnabled });
     } catch (err) {
       console.warn("[Popup] Failed to update enabled state:", err);
     }
-
-    // Small delay so the user sees the busy state before it resolves
-    // (the actual bookmark rewriting happens asynchronously in background)
-    setTimeout(() => {
-      enabledToggle.disabled = false;
-      updateVisualState(isEnabled);
-    }, 600);
   });
 
   // Focus new tab toggle
