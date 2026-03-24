@@ -59,6 +59,9 @@ const DEFAULT_SETTINGS = {
   position: "end",        // Where to place the new tab: "end" | "right"
 };
 
+/** Rule ID for the dynamic declarativeNetRequest backup rule */
+const DYNAMIC_RULE_ID = 9999;
+
 // ─── State ───────────────────────────────────────────────────────────────────
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -66,8 +69,12 @@ let settings = { ...DEFAULT_SETTINGS };
  * Tracks tab IDs that have already been handled by the webNavigation
  * onBeforeNavigate listener. This prevents the downloads.onCreated listener
  * from opening a duplicate tab for the same bookmark click.
+ *
+ * Each entry stores: { cleanUrl, originalUrl }
+ *   - cleanUrl:    the bookmark destination (prefix stripped)
+ *   - originalUrl: the URL the tab was on before the bookmark click
  */
-const handledTabs = new Map(); // tabId → cleanUrl
+const handledTabs = new Map(); // tabId → { cleanUrl, originalUrl }
 
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
@@ -287,6 +294,58 @@ chrome.bookmarks.onChanged.addListener(async (id, changeInfo) => {
   }
 });
 
+// ─── Dynamic declarativeNetRequest Rule ──────────────────────────────────────
+// The static ruleset (rules.json) sometimes fails to fire on the first
+// navigation after a service worker restart, or when the extension is first
+// loaded. This leaves the current tab unprotected — Chrome navigates it to
+// the newtab@ URL, tearing down pages like Spotify mid-playback.
+//
+// A dynamic rule is more resilient: it persists in Chrome's internal storage
+// independently of the service worker lifecycle and the static manifest.
+// We add it as a backup with the same match pattern and redirect action.
+
+/**
+ * Ensures a dynamic declarativeNetRequest redirect rule exists.
+ * This is idempotent — safe to call on every init / enable.
+ */
+async function ensureDynamicRedirectRule() {
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [DYNAMIC_RULE_ID],
+      addRules: [
+        {
+          id: DYNAMIC_RULE_ID,
+          priority: 1,
+          action: {
+            type: "redirect",
+            redirect: { extensionPath: "/" + EMPTY_ZIP_FILENAME },
+          },
+          condition: {
+            regexFilter: "^https?://newtab@",
+            resourceTypes: ["main_frame"],
+          },
+        },
+      ],
+    });
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not add dynamic redirect rule:", err);
+  }
+}
+
+/**
+ * Removes the dynamic declarativeNetRequest redirect rule.
+ * Called when the extension is disabled.
+ */
+async function removeDynamicRedirectRule() {
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [DYNAMIC_RULE_ID],
+    });
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not remove dynamic redirect rule:", err);
+  }
+}
+
 // ─── Open URL Helper ─────────────────────────────────────────────────────────
 
 /**
@@ -327,10 +386,18 @@ async function openInNewTab(cleanUrl) {
 }
 
 // ─── Primary Interceptor: webNavigation.onBeforeNavigate ─────────────────────
-// This fires BEFORE the declarativeNetRequest redirect, so we can open the
-// new tab immediately without waiting for the download round-trip.
-// The download will still be created and cancelled, but even if cancellation
-// is slow (e.g. service worker cold start), the user already has their tab.
+// This fires BEFORE the declarativeNetRequest redirect processes the request.
+// At this point the current page is still fully alive (no teardown yet).
+//
+// We do two things here:
+//   1. Open the real bookmark URL in a new tab immediately.
+//   2. Save the original tab URL so we can restore it in the onCommitted
+//      fallback if the declarativeNetRequest redirect fails.
+//
+// Normally the declarativeNetRequest redirect converts the navigation into a
+// download, so the current tab is never affected. But if the redirect fails
+// (cold start, rule not yet loaded), onCommitted will fire with the newtab@
+// URL and we'll use the saved URL to navigate the tab back.
 
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // Only act on top-level frame navigations
@@ -341,8 +408,18 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   const cleanUrl = removePrefix(details.url);
   if (!cleanUrl) return;
 
-  // Mark this tab as handled so the download listener skips it
-  handledTabs.set(details.tabId, cleanUrl);
+  // Grab the tab's current URL BEFORE the navigation replaces it.
+  // This is our lifeline for restoring the tab if the redirect fails.
+  let originalUrl = "";
+  try {
+    const tab = await chrome.tabs.get(details.tabId);
+    originalUrl = tab.url || "";
+  } catch (err) {
+    // Tab may have been closed — non-critical
+  }
+
+  // Mark this tab as handled so downstream listeners don't duplicate work
+  handledTabs.set(details.tabId, { cleanUrl, originalUrl });
 
   // Clean up the entry after 10 seconds to avoid memory leaks
   setTimeout(() => handledTabs.delete(details.tabId), 10000);
@@ -386,7 +463,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   // ── Check if already handled by onBeforeNavigate ───────────────────
   // If the webNavigation listener already opened the tab, skip.
   if (downloadItem.tabId !== undefined && handledTabs.has(downloadItem.tabId)) {
-    handledTabs.delete(downloadItem.tabId);
+    // Keep the entry for a moment — onCommitted may still fire and need it
     return;
   }
 
@@ -418,10 +495,8 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 // browser actually navigates to the newtab@ URL, which breaks sites that use
 // fetch() with relative URLs (the Fetch API spec forbids credentials in URLs).
 //
-// This listener catches any newtab@ page that slips through the redirect rule.
-// It strips the prefix and either:
-//   a) Updates the current tab (if it was the only page, e.g. new-tab origin)
-//   b) Opens the clean URL in a new tab and navigates the original tab back
+// If onBeforeNavigate already captured the original tab URL, we can restore
+// the tab to exactly where it was. Otherwise we fall back to goBack().
 
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   // Only act on top-level frame navigations
@@ -432,54 +507,59 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // (means the declarativeNetRequest rule did NOT redirect it)
   if (!hasPrefix(details.url)) return;
 
-  // If onBeforeNavigate already handled this tab, skip
-  if (handledTabs.has(details.tabId)) {
-    handledTabs.delete(details.tabId);
-    return;
-  }
+  const tabId = details.tabId;
+  const handled = handledTabs.get(tabId);
+  handledTabs.delete(tabId);
+
+  // If onBeforeNavigate already opened the new tab, we just need to
+  // restore the current tab — don't open a duplicate.
+  const needsNewTab = !handled;
 
   const cleanUrl = removePrefix(details.url);
-  const tabId = details.tabId;
 
   try {
-    // Check how many entries the tab has in its history.
-    // If it only has 1 entry (the newtab@ URL itself), it was a new tab
-    // or single-page tab — just update it in place.
     const tab = await chrome.tabs.get(tabId);
 
-    // Determine if this tab was essentially empty before the bookmark click.
-    // A tab with no prior history (e.g. opened from new-tab page) can be
-    // reused. We detect this by checking navigation entry count via the
-    // transitionType — "typed" or "auto_bookmark" from a new tab typically
-    // means the tab has no meaningful prior page.
+    // Determine if the tab was empty / new-tab before the bookmark click
     const isFromNewTab = (
       details.transitionType === "auto_bookmark" ||
       details.transitionType === "typed"
     );
+    const wasNewTabPage = handled
+      ? isNewTabPage(handled.originalUrl)
+      : (isFromNewTab && (!tab.openerTabId || isNewTabPage(tab.pendingUrl)));
 
-    // Try to detect if the tab had real content before.
-    // If the tab's history only contains the newtab@ URL, reuse it.
-    // Otherwise, open a new tab and go back.
-    if (isFromNewTab && (!tab.openerTabId || isNewTabPage(tab.pendingUrl))) {
-      // Simple case: just replace the newtab@ URL with the clean URL
+    if (wasNewTabPage) {
+      // The tab was empty — just load the bookmark URL there
       await chrome.tabs.update(tabId, { url: cleanUrl });
     } else {
-      // Open clean URL in a new tab
-      let createOptions = {
-        url: cleanUrl,
-        active: settings.focusNewTab,
-      };
-      if (settings.position === "right") {
-        createOptions.index = tab.index + 1;
+      // Open the bookmark in a new tab (unless onBeforeNavigate already did)
+      if (needsNewTab) {
+        let createOptions = {
+          url: cleanUrl,
+          active: settings.focusNewTab,
+        };
+        if (settings.position === "right") {
+          createOptions.index = tab.index + 1;
+        }
+        await chrome.tabs.create(createOptions);
       }
-      await chrome.tabs.create(createOptions);
 
-      // Navigate the original tab back to restore its previous page
-      try {
-        await chrome.tabs.goBack(tabId);
-      } catch (err) {
-        // goBack may fail if there's no history — just update to new-tab
-        await chrome.tabs.update(tabId, { url: "chrome://newtab" });
+      // ── Restore the original tab ────────────────────────────────────
+      // If we have the exact URL from onBeforeNavigate, use it directly.
+      // This is more reliable than goBack() because:
+      //   - goBack() depends on session history which may be inconsistent
+      //   - goBack() may fail if the newtab@ page replaced history
+      // If we don't have the original URL, fall back to goBack().
+      if (handled && handled.originalUrl && !isNewTabPage(handled.originalUrl)) {
+        await chrome.tabs.update(tabId, { url: handled.originalUrl });
+      } else {
+        try {
+          await chrome.tabs.goBack(tabId);
+        } catch (err) {
+          // goBack may fail if there's no history — just update to new-tab
+          await chrome.tabs.update(tabId, { url: "chrome://newtab" });
+        }
       }
     }
   } catch (err) {
@@ -517,10 +597,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
  * declarativeNetRequest redirect rule.
  */
 async function enableExtension() {
-  // Enable the redirect rule
+  // Enable the static redirect rule
   await chrome.declarativeNetRequest.updateEnabledRulesets({
     enableRulesetIds: ["newtab_redirect"],
   });
+
+  // Add a dynamic backup rule (more reliable across service worker restarts)
+  await ensureDynamicRedirectRule();
 
   // Add prefix to all bookmarks
   await prefixAllBookmarks();
@@ -537,10 +620,11 @@ async function disableExtension() {
   // Remove prefix from all bookmarks first (so they work normally)
   await unprefixAllBookmarks();
 
-  // Disable the redirect rule
+  // Disable both static and dynamic redirect rules
   await chrome.declarativeNetRequest.updateEnabledRulesets({
     disableRulesetIds: ["newtab_redirect"],
   });
+  await removeDynamicRedirectRule();
 
   // Stop the keep-alive alarm
   await chrome.alarms.clear("keepAlive");
@@ -639,6 +723,10 @@ async function init() {
   }
 
   if (settings.enabled) {
+    // Ensure the dynamic redirect rule is present (survives SW restarts,
+    // but may be missing after extension update or Chrome profile migration)
+    await ensureDynamicRedirectRule();
+
     // Ensure keep-alive alarm is active (it may have been cleared if the
     // service worker was terminated and restarted)
     await setupKeepAlive();
