@@ -62,6 +62,13 @@ const DEFAULT_SETTINGS = {
 // ─── State ───────────────────────────────────────────────────────────────────
 let settings = { ...DEFAULT_SETTINGS };
 
+/**
+ * Tracks tab IDs that have already been handled by the webNavigation
+ * onBeforeNavigate listener. This prevents the downloads.onCreated listener
+ * from opening a duplicate tab for the same bookmark click.
+ */
+const handledTabs = new Map(); // tabId → cleanUrl
+
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
 /**
@@ -280,81 +287,16 @@ chrome.bookmarks.onChanged.addListener(async (id, changeInfo) => {
   }
 });
 
-// ─── Download Interception ───────────────────────────────────────────────────
+// ─── Open URL Helper ─────────────────────────────────────────────────────────
 
 /**
- * The declarativeNetRequest rule redirects any newtab@ URL to empty.zip,
- * which Chrome treats as a download. This listener catches that download
- * the moment it starts, cancels it (no file is saved to disk), extracts
- * the original URL, and opens it in a new tab.
+ * Opens a clean (prefix-stripped) URL in a new tab, or reuses the active tab
+ * if it's an empty / new-tab page. Respects user settings for focus and
+ * tab position.
  *
- * The current tab is completely untouched — no navigation ever happens.
- *
- * IMPORTANT: After a declarativeNetRequest redirect, Chrome may report
- * the download's fields inconsistently across versions:
- *   - downloadItem.url       → could be the original newtab@ URL OR the
- *                               extension's empty.zip URL
- *   - downloadItem.finalUrl  → could be the extension's empty.zip URL
- *   - downloadItem.referrer  → could be the newtab@ URL
- *
- * We check ALL fields to reliably detect our download and extract the
- * original bookmark URL.
+ * @param {string} cleanUrl  The destination URL (without newtab@ prefix).
  */
-chrome.downloads.onCreated.addListener(async (downloadItem) => {
-  const emptyZipUrl = chrome.runtime.getURL(EMPTY_ZIP_FILENAME);
-
-  // ── Detect whether this download belongs to us ─────────────────────
-  // Check if any URL field matches our empty.zip or contains newtab@
-  const urlHasPrefix      = hasPrefix(downloadItem.url || "");
-  const finalUrlIsZip     = (downloadItem.finalUrl === emptyZipUrl);
-  const urlIsZip          = (downloadItem.url === emptyZipUrl);
-  const referrerHasPrefix = hasPrefix(downloadItem.referrer || "");
-
-  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip || referrerHasPrefix;
-  if (!isOurDownload) return;
-
-  // ── Cancel the dummy download immediately ──────────────────────────
-  // No file is saved to disk, and if we're fast enough Chrome won't
-  // flash the download bar at all.
-  try {
-    await chrome.downloads.cancel(downloadItem.id);
-  } catch (err) {
-    console.warn("[Bookmarks→NewTab] Could not cancel download:", err);
-  }
-
-  // Erase it from the download history to keep things clean
-  try {
-    await chrome.downloads.erase({ id: downloadItem.id });
-  } catch (err) {
-    // Not critical — just keeps the downloads list tidy
-    console.warn("[Bookmarks→NewTab] Could not erase download:", err);
-  }
-
-  // ── Extract the original newtab@ URL ───────────────────────────────
-  // The newtab@ URL may appear in .url, .finalUrl, or .referrer
-  // depending on Chrome's internal handling. We check all of them.
-  let newtabUrl = "";
-  if (urlHasPrefix) {
-    newtabUrl = downloadItem.url;
-  } else if (referrerHasPrefix) {
-    newtabUrl = downloadItem.referrer;
-  } else if (hasPrefix(downloadItem.finalUrl || "")) {
-    newtabUrl = downloadItem.finalUrl;
-  }
-
-  // Strip the newtab@ prefix to get the real destination URL
-  const cleanUrl = newtabUrl ? removePrefix(newtabUrl) : "";
-  if (!cleanUrl) {
-    console.warn(
-      "[Bookmarks→NewTab] Could not extract original URL from download item:",
-      { url: downloadItem.url, finalUrl: downloadItem.finalUrl, referrer: downloadItem.referrer }
-    );
-    return;
-  }
-
-  // ── Open the real URL ───────────────────────────────────────────────
-  // If the active tab is an empty / new-tab page, load the bookmark
-  // there instead of opening yet another tab.
+async function openInNewTab(cleanUrl) {
   try {
     const [activeTab] = await chrome.tabs.query({
       active: true,
@@ -382,6 +324,92 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   } catch (err) {
     console.warn("[Bookmarks→NewTab] Error opening new tab:", err);
   }
+}
+
+// ─── Primary Interceptor: webNavigation.onBeforeNavigate ─────────────────────
+// This fires BEFORE the declarativeNetRequest redirect, so we can open the
+// new tab immediately without waiting for the download round-trip.
+// The download will still be created and cancelled, but even if cancellation
+// is slow (e.g. service worker cold start), the user already has their tab.
+
+chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  // Only act on top-level frame navigations
+  if (details.frameId !== 0) return;
+  if (!settings.enabled) return;
+  if (!hasPrefix(details.url)) return;
+
+  const cleanUrl = removePrefix(details.url);
+  if (!cleanUrl) return;
+
+  // Mark this tab as handled so the download listener skips it
+  handledTabs.set(details.tabId, cleanUrl);
+
+  // Clean up the entry after 10 seconds to avoid memory leaks
+  setTimeout(() => handledTabs.delete(details.tabId), 10000);
+
+  // Open the real URL in a new tab immediately
+  await openInNewTab(cleanUrl);
+});
+
+// ─── Download Interception (Safety Net) ──────────────────────────────────────
+// The declarativeNetRequest rule still redirects newtab@ URLs to empty.zip,
+// creating a dummy download. This listener cancels it and erases it from
+// history. It also serves as a fallback to open the URL if the
+// webNavigation listener didn't fire (edge cases).
+
+chrome.downloads.onCreated.addListener(async (downloadItem) => {
+  const emptyZipUrl = chrome.runtime.getURL(EMPTY_ZIP_FILENAME);
+
+  // ── Detect whether this download belongs to us ─────────────────────
+  const urlHasPrefix      = hasPrefix(downloadItem.url || "");
+  const finalUrlIsZip     = (downloadItem.finalUrl === emptyZipUrl);
+  const urlIsZip          = (downloadItem.url === emptyZipUrl);
+  const referrerHasPrefix = hasPrefix(downloadItem.referrer || "");
+
+  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip || referrerHasPrefix;
+  if (!isOurDownload) return;
+
+  // ── Cancel the dummy download immediately ──────────────────────────
+  try {
+    await chrome.downloads.cancel(downloadItem.id);
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not cancel download:", err);
+  }
+
+  // Erase it from the download history
+  try {
+    await chrome.downloads.erase({ id: downloadItem.id });
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not erase download:", err);
+  }
+
+  // ── Check if already handled by onBeforeNavigate ───────────────────
+  // If the webNavigation listener already opened the tab, skip.
+  if (downloadItem.tabId !== undefined && handledTabs.has(downloadItem.tabId)) {
+    handledTabs.delete(downloadItem.tabId);
+    return;
+  }
+
+  // ── Fallback: extract URL and open tab ─────────────────────────────
+  let newtabUrl = "";
+  if (urlHasPrefix) {
+    newtabUrl = downloadItem.url;
+  } else if (referrerHasPrefix) {
+    newtabUrl = downloadItem.referrer;
+  } else if (hasPrefix(downloadItem.finalUrl || "")) {
+    newtabUrl = downloadItem.finalUrl;
+  }
+
+  const cleanUrl = newtabUrl ? removePrefix(newtabUrl) : "";
+  if (!cleanUrl) {
+    console.warn(
+      "[Bookmarks→NewTab] Could not extract original URL from download item:",
+      { url: downloadItem.url, finalUrl: downloadItem.finalUrl, referrer: downloadItem.referrer }
+    );
+    return;
+  }
+
+  await openInNewTab(cleanUrl);
 });
 
 // ─── Fallback: webNavigation Safety Net ──────────────────────────────────────
@@ -403,6 +431,12 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // Only handle URLs that still contain our newtab@ prefix
   // (means the declarativeNetRequest rule did NOT redirect it)
   if (!hasPrefix(details.url)) return;
+
+  // If onBeforeNavigate already handled this tab, skip
+  if (handledTabs.has(details.tabId)) {
+    handledTabs.delete(details.tabId);
+    return;
+  }
 
   const cleanUrl = removePrefix(details.url);
   const tabId = details.tabId;
@@ -594,6 +628,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
 async function init() {
   await loadSettings();
+
+  // Hide the download UI for our dummy empty.zip downloads (Chrome 117+).
+  // Even if the downloads.onCreated cancel is slightly delayed, the user
+  // won't see a download bubble flash.
+  try {
+    await chrome.downloads.setUiOptions?.({ enabled: false });
+  } catch (err) {
+    // Not supported in older Chrome — non-critical
+  }
 
   if (settings.enabled) {
     // Ensure keep-alive alarm is active (it may have been cleared if the
