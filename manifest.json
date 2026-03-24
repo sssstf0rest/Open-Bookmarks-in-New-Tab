@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Open Bookmarks in New Tab",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "Automatically opens clicked bookmarks in a new tab, preserving your current page.",
   "permissions": [
     "bookmarks",
