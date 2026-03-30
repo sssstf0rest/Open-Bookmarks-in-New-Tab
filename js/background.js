@@ -80,7 +80,7 @@ const CREDENTIAL_STRIPPED_DOMAINS = [
   // "gstatic.com",
   // Microsoft
   // "microsoft.com",
-  // "cloud.microsoft",
+  "cloud.microsoft",
   // "live.com",
   "outlook.com",
   // "office.com",
