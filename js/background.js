@@ -52,6 +52,43 @@ const EMPTY_ZIP_FILENAME = "empty.zip";
 /** Interval (minutes) for the keep-alive alarm */
 const KEEPALIVE_INTERVAL_MIN = 0.5;
 
+/**
+ * Redirect page hosted on GitHub Pages.
+ * Used as a proxy for bookmarks on domains where Chrome silently strips
+ * the newtab@ userinfo (e.g. Google, Microsoft). The bookmark URL is
+ * encoded in the ?url= query parameter:
+ *   https://newtab@<REDIRECT_PAGE>?url=https%3A%2F%2Fmail.google.com%2F...
+ *
+ * Because this domain is NOT on Chrome's credential-stripping list,
+ * newtab@ stays intact and declarativeNetRequest can match it.
+ */
+const REDIRECT_PAGE_BASE =
+  "https://sssstf0rest.github.io/Open-Bookmarks-in-New-Tab/redirect.html";
+
+/**
+ * Domains where Chrome's network stack silently strips the newtab@
+ * userinfo before the request reaches declarativeNetRequest.
+ * For these domains, bookmarks are wrapped via the redirect page.
+ */
+const CREDENTIAL_STRIPPED_DOMAINS = [
+  // Google
+  "google.com",
+  "gmail.com",
+  "youtube.com",
+  "googleapis.com",
+  "googlevideo.com",
+  "gstatic.com",
+  // Microsoft
+  "microsoft.com",
+  "cloud.microsoft",
+  "live.com",
+  "outlook.com",
+  "office.com",
+  "office365.com",
+  "microsoftonline.com",
+  "sharepoint.com",
+];
+
 // ─── Default Settings ────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
   enabled: true,          // Extension active by default
@@ -112,8 +149,50 @@ function canPrefixUrl(url) {
 }
 
 /**
+ * Returns true if the URL's domain is on the credential-stripping list.
+ * For these domains, Chrome removes the newtab@ userinfo before the
+ * request reaches declarativeNetRequest, so we must use the redirect
+ * page proxy instead.
+ *
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isCredentialStrippedDomain(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return CREDENTIAL_STRIPPED_DOMAINS.some(
+      (domain) => hostname === domain || hostname.endsWith("." + domain)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true if the URL is a redirect-page-wrapped bookmark.
+ *   https://newtab@sssstf0rest.github.io/.../redirect.html?url=...
+ *
+ * @param {string} url  The URL to check (with or without newtab@ prefix).
+ * @returns {boolean}
+ */
+function isRedirectPageUrl(url) {
+  // Strip newtab@ if present, then check against REDIRECT_PAGE_BASE
+  const stripped = url.replace(
+    new RegExp(`^(https?://)${escapeRegex(NEWTAB_PREFIX)}`, "i"),
+    "$1"
+  );
+  return stripped.startsWith(REDIRECT_PAGE_BASE);
+}
+
+/**
  * Adds the "newtab@" prefix to a URL.
+ *
+ * For normal domains:
  *   https://example.com → https://newtab@example.com
+ *
+ * For credential-stripped domains (Google, Microsoft, etc.):
+ *   https://mail.google.com/... →
+ *   https://newtab@sssstf0rest.github.io/.../redirect.html?url=https%3A%2F%2Fmail.google.com%2F...
  *
  * If the URL already has the prefix or is not http(s), returns it unchanged.
  *
@@ -124,22 +203,50 @@ function addPrefix(url) {
   if (!canPrefixUrl(url)) return url;
   if (hasPrefix(url)) return url;
 
-  // Insert "newtab@" right after the "://" scheme separator
+  if (isCredentialStrippedDomain(url)) {
+    // Wrap in the redirect page with the real URL as a query parameter.
+    // newtab@ is applied to the redirect page domain (which Chrome won't strip).
+    return `https://${NEWTAB_PREFIX}${REDIRECT_PAGE_BASE.replace(/^https?:\/\//, "")}?url=${encodeURIComponent(url)}`;
+  }
+
+  // Simple prefix — insert "newtab@" right after the "://" scheme separator
   return url.replace(/^(https?:\/\/)/i, `$1${NEWTAB_PREFIX}`);
 }
 
 /**
- * Removes the "newtab@" prefix from a URL.
+ * Removes the "newtab@" prefix from a URL and unwraps redirect-page URLs.
+ *
+ * Simple case:
  *   https://newtab@example.com → https://example.com
+ *
+ * Redirect-page case:
+ *   https://newtab@.../redirect.html?url=https%3A%2F%2Fmail.google.com%2F...
+ *   → https://mail.google.com/...
  *
  * @param {string} url  The prefixed URL.
  * @returns {string}    The cleaned URL.
  */
 function removePrefix(url) {
-  return url.replace(
+  if (!hasPrefix(url)) return url;
+
+  // Strip the newtab@ marker first
+  const stripped = url.replace(
     new RegExp(`^(https?://)${escapeRegex(NEWTAB_PREFIX)}`, "i"),
     "$1"
   );
+
+  // If this is a redirect-page URL, extract the real URL from ?url= param
+  if (stripped.startsWith(REDIRECT_PAGE_BASE)) {
+    try {
+      const parsed = new URL(stripped);
+      const realUrl = parsed.searchParams.get("url");
+      if (realUrl) return realUrl;
+    } catch {
+      // Fall through to return the stripped URL
+    }
+  }
+
+  return stripped;
 }
 
 /**
