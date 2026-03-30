@@ -72,11 +72,11 @@ const handledTabs = new Map(); // tabId → cleanUrl
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
 /**
- * Loads user settings from chrome.storage.local, falling back to defaults.
+ * Loads user settings from chrome.storage.sync, falling back to defaults.
  */
 async function loadSettings() {
   try {
-    const stored = await chrome.storage.local.get("settings");
+    const stored = await chrome.storage.sync.get("settings");
     if (stored.settings) {
       settings = { ...DEFAULT_SETTINGS, ...stored.settings };
     }
@@ -86,11 +86,11 @@ async function loadSettings() {
 }
 
 /**
- * Persists the current settings object to chrome.storage.local.
+ * Persists the current settings object to chrome.storage.sync.
  */
 async function saveSettings() {
   try {
-    await chrome.storage.local.set({ settings });
+    await chrome.storage.sync.set({ settings });
   } catch (err) {
     console.warn("[Bookmarks→NewTab] Failed to save settings:", err);
   }
@@ -413,55 +413,90 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 });
 
 // ─── Fallback: webNavigation Safety Net ──────────────────────────────────────
-// On some browsers (e.g. Edge on Windows) or under certain timing conditions,
-// the declarativeNetRequest redirect rule may not fire. When that happens the
-// browser actually navigates to the newtab@ URL, which breaks sites that use
-// fetch() with relative URLs (the Fetch API spec forbids credentials in URLs).
+// This listener handles TWO cases where the current tab navigates instead of
+// being silently redirected to the empty.zip download:
 //
-// This listener catches any newtab@ page that slips through the redirect rule.
-// It strips the prefix and either:
-//   a) Updates the current tab (if it was the only page, e.g. new-tab origin)
-//   b) Opens the clean URL in a new tab and navigates the original tab back
+// Case A — "prefix intact": The URL still contains newtab@ when onCommitted
+//   fires. This happens on some browsers (e.g. Edge) or under timing issues
+//   where declarativeNetRequest didn't redirect.
+//
+// Case B — "prefix stripped": Chrome's network stack silently strips the
+//   newtab@ userinfo from URLs on certain high-security domains (Gmail,
+//   Outlook, etc.) that are on Chrome's HSTS preload list. The
+//   declarativeNetRequest rule never matches because the URL no longer
+//   contains "newtab@" by the time it reaches the network layer.
+//   In this case, onBeforeNavigate DID see the newtab@ URL and already
+//   opened a new tab + recorded the tabId in handledTabs. We just need
+//   to restore the current tab.
 
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   // Only act on top-level frame navigations
   if (details.frameId !== 0) return;
   if (!settings.enabled) return;
 
-  // Only handle URLs that still contain our newtab@ prefix
-  // (means the declarativeNetRequest rule did NOT redirect it)
-  if (!hasPrefix(details.url)) return;
+  const urlHasPrefix = hasPrefix(details.url);
+  const handled = handledTabs.get(details.tabId);
 
-  // If onBeforeNavigate already handled this tab, skip
-  if (handledTabs.has(details.tabId)) {
+  // ── Case B: prefix was stripped by Chrome (Gmail, Outlook, etc.) ────
+  // onBeforeNavigate already opened a new tab. The current tab navigated
+  // to the clean URL because Chrome stripped newtab@ before
+  // declarativeNetRequest could redirect it. We need to undo this
+  // navigation so the current tab goes back to where it was.
+  if (!urlHasPrefix && handled) {
     handledTabs.delete(details.tabId);
+    const tabId = details.tabId;
+
+    try {
+      // Try to go back to the previous page
+      await chrome.tabs.goBack(tabId);
+    } catch (err) {
+      // goBack fails if the tab has no history (e.g. Cmd+Click opened a
+      // new tab for the bookmark). In that case, close the duplicate tab
+      // since onBeforeNavigate already opened the URL in another tab.
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch (removeErr) {
+        // Last resort — navigate to new-tab page
+        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
+      }
+    }
     return;
   }
 
+  // ── Case A: prefix still intact ────────────────────────────────────
+  if (!urlHasPrefix) return;
+
+  // If onBeforeNavigate already opened the new tab, just restore this tab
+  if (handled) {
+    handledTabs.delete(details.tabId);
+    const tabId = details.tabId;
+
+    try {
+      await chrome.tabs.goBack(tabId);
+    } catch (err) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch (removeErr) {
+        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // onBeforeNavigate did NOT handle this — full fallback
   const cleanUrl = removePrefix(details.url);
   const tabId = details.tabId;
 
   try {
-    // Check how many entries the tab has in its history.
-    // If it only has 1 entry (the newtab@ URL itself), it was a new tab
-    // or single-page tab — just update it in place.
     const tab = await chrome.tabs.get(tabId);
 
-    // Determine if this tab was essentially empty before the bookmark click.
-    // A tab with no prior history (e.g. opened from new-tab page) can be
-    // reused. We detect this by checking navigation entry count via the
-    // transitionType — "typed" or "auto_bookmark" from a new tab typically
-    // means the tab has no meaningful prior page.
     const isFromNewTab = (
       details.transitionType === "auto_bookmark" ||
       details.transitionType === "typed"
     );
 
-    // Try to detect if the tab had real content before.
-    // If the tab's history only contains the newtab@ URL, reuse it.
-    // Otherwise, open a new tab and go back.
     if (isFromNewTab && (!tab.openerTabId || isNewTabPage(tab.pendingUrl))) {
-      // Simple case: just replace the newtab@ URL with the clean URL
+      // Tab was empty — just load the bookmark URL there
       await chrome.tabs.update(tabId, { url: cleanUrl });
     } else {
       // Open clean URL in a new tab
@@ -478,7 +513,6 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
       try {
         await chrome.tabs.goBack(tabId);
       } catch (err) {
-        // goBack may fail if there's no history — just update to new-tab
         await chrome.tabs.update(tabId, { url: "chrome://newtab" });
       }
     }
@@ -586,8 +620,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ─── Listen for storage changes (sync across popup & background) ─────────────
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.settings) {
+  if (area === "sync" && changes.settings) {
+    const previousEnabled = settings.enabled;
     settings = { ...DEFAULT_SETTINGS, ...changes.settings.newValue };
+
+    // If the enabled state changed (e.g. toggled from another device),
+    // apply the change on this device too.
+    if (settings.enabled !== previousEnabled) {
+      if (settings.enabled) {
+        enableExtension();
+      } else {
+        disableExtension();
+      }
+    }
   }
 });
 
