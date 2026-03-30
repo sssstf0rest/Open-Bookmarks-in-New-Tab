@@ -539,8 +539,16 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // to the clean URL because Chrome stripped newtab@ before
   // declarativeNetRequest could redirect it. We need to undo this
   // navigation so the current tab goes back to where it was.
+  //
+  // Exception: if the committed URL matches the handled cleanUrl, it
+  // means openInNewTab() reused this tab (it was a new-tab page) and
+  // navigated it directly to the bookmark destination. Don't restore.
   if (!urlHasPrefix && handled) {
     handledTabs.delete(details.tabId);
+
+    // Tab was reused by openInNewTab — nothing to restore
+    if (details.url === handled) return;
+
     const tabId = details.tabId;
 
     try {
@@ -566,6 +574,10 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // If onBeforeNavigate already opened the new tab, just restore this tab
   if (handled) {
     handledTabs.delete(details.tabId);
+
+    // Tab was reused by openInNewTab — nothing to restore
+    if (removePrefix(details.url) === handled) return;
+
     const tabId = details.tabId;
 
     try {
