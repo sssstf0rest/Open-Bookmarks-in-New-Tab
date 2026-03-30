@@ -72,17 +72,19 @@ const REDIRECT_PAGE_BASE =
  */
 const CREDENTIAL_STRIPPED_DOMAINS = [
   // Google
+  "mail.google.com/mail/u/0/#inbox",
   // "google.com",
-  "gmail.com",
+  // "gmail.com",
   // "youtube.com",
   // "googleapis.com",
   // "googlevideo.com",
   // "gstatic.com",
   // Microsoft
   // "microsoft.com",
-  "cloud.microsoft",
+  // "cloud.microsoft",
   // "live.com",
-  "outlook.com",
+  // "outlook.com",
+  "outlook.cloud.microsoft/mail/",
   // "office.com",
   // "office365.com",
   // "microsoftonline.com",
