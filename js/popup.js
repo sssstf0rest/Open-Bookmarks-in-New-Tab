@@ -64,7 +64,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("lang-en").classList.toggle("lang-switch__btn--active", lang === "en");
     document.getElementById("lang-zh").classList.toggle("lang-switch__btn--active", lang === "zh");
     // Persist preference
-    chrome.storage.local.set({ lang });
+    chrome.storage.sync.set({ lang });
   }
 
   function t(key) {
@@ -188,7 +188,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ─── Kick off ────────────────────────────────────────────────────────
   // Restore saved language, then init UI
-  chrome.storage.local.get("lang", (result) => {
+  chrome.storage.sync.get("lang", (result) => {
     if (result.lang) applyLang(result.lang);
     initUI();
   });

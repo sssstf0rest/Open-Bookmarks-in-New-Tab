@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open Bookmarks in New Tab — Chrome Extension</title>
+  <style>
+    /* ── Reset ──────────────────────────────────────────────────────────── */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    /* ── Design Tokens ──────────────────────────────────────────────────── */
+    :root {
+      --bg:          #0f172a;
+      --card:        #1e293b;
+      --card-alt:    #263348;
+      --text:        #e2e8f0;
+      --text-sec:    #94a3b8;
+      --accent:      #4fc3f7;
+      --accent-dim:  rgba(79, 195, 247, 0.12);
+      --border:      rgba(255, 255, 255, 0.06);
+      --radius:      12px;
+      --green:       #4ade80;
+      --green-dim:   rgba(74, 222, 128, 0.12);
+    }
+
+    /* ── Page ───────────────────────────────────────────────────────────── */
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.75;
+      padding: 2.5rem 1rem;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Container ──────────────────────────────────────────────────────── */
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 3rem;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 72px;
+      height: 72px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, var(--accent), #0288d1);
+      margin-bottom: 1.25rem;
+    }
+    .header-icon svg {
+      width: 36px;
+      height: 36px;
+      color: #fff;
+    }
+    h1 {
+      font-size: 1.85rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 0.4rem;
+    }
+    .tagline {
+      font-size: 1.05rem;
+      color: var(--text-sec);
+    }
+
+    /* ── Redirect Banner ────────────────────────────────────────────────── */
+    .redirect-banner {
+      background: var(--green-dim);
+      border: 1px solid rgba(74, 222, 128, 0.25);
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+      text-align: center;
+      display: none;
+    }
+    .redirect-banner p {
+      color: var(--green);
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+    .redirect-banner a {
+      color: var(--green);
+      text-decoration: underline;
+      word-break: break-all;
+    }
+
+    /* ── CTA Button ─────────────────────────────────────────────────────── */
+    .cta {
+      display: block;
+      width: 100%;
+      max-width: 380px;
+      margin: 0 auto 2.5rem;
+      padding: 14px 24px;
+      background: linear-gradient(135deg, var(--accent), #0288d1);
+      color: #fff;
+      font-size: 1.05rem;
+      font-weight: 600;
+      text-align: center;
+      text-decoration: none;
+      border-radius: 10px;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+    .cta:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+      text-decoration: none;
+    }
+    .cta-secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-sec);
+      margin-top: -0.5rem;
+    }
+    .cta-secondary:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── Features Grid ──────────────────────────────────────────────────── */
+    .features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 2.5rem;
+    }
+    .feature {
+      background: var(--card-alt);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+    }
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .feature h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 0.3rem;
+    }
+    .feature p {
+      font-size: 0.85rem;
+      color: var(--text-sec);
+      margin: 0;
+    }
+
+    /* ── How It Works ───────────────────────────────────────────────────── */
+    h2 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 1rem;
+    }
+    .steps {
+      margin-bottom: 2.5rem;
+    }
+    .step {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      align-items: flex-start;
+    }
+    .step-num {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 0.85rem;
+    }
+    .step-text {
+      padding-top: 4px;
+      font-size: 0.95rem;
+    }
+    .step-text strong {
+      color: #fff;
+    }
+
+    /* ── Highlight Box ──────────────────────────────────────────────────── */
+    .highlight {
+      background: var(--accent-dim);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 1rem 1.25rem;
+      margin-bottom: 2rem;
+      font-size: 0.92rem;
+    }
+    .highlight strong {
+      color: var(--accent);
+    }
+
+    /* ── Links ──────────────────────────────────────────────────────────── */
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      transition: opacity 0.15s ease;
+    }
+    a:hover {
+      text-decoration: underline;
+      opacity: 0.85;
+    }
+
+    /* ── Footer ─────────────────────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      margin-top: 2rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-sec);
+    }
+    footer a {
+      color: var(--text-sec);
+    }
+
+    /* ── Responsive ─────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      main { padding: 1.5rem; }
+      h1 { font-size: 1.4rem; }
+      .features { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <main>
+    <!-- ── Redirect Banner (shown when ?url= param exists) ──────────── -->
+    <div class="redirect-banner" id="redirect-banner">
+      <p>Redirecting you to your bookmark...</p>
+      <a id="redirect-link" href="#">Loading...</a>
+    </div>
+
+    <!-- ── Header ───────────────────────────────────────────────────── -->
+    <div class="header">
+      <div class="header-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
+      <h1>Open Bookmarks in New Tab</h1>
+      <p class="tagline">Keep your current page. Every bookmark opens in a new tab.</p>
+    </div>
+
+    <!-- ── CTA ──────────────────────────────────────────────────────── -->
+    <a class="cta"
+       href="https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo"
+       target="_blank" rel="noopener noreferrer">
+      Install from Chrome Web Store
+    </a>
+    <a class="cta cta-secondary"
+       href="https://github.com/sssstf0rest/Open-Bookmarks-in-New-Tab"
+       target="_blank" rel="noopener noreferrer">
+      View Project on GitHub
+    </a>
+
+    <!-- ── Features ─────────────────────────────────────────────────── -->
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">&#128640;</div>
+        <h3>Zero Disruption</h3>
+        <p>YouTube keeps playing, forms stay filled, Spotify never stops.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#9889;</div>
+        <h3>Instant</h3>
+        <p>New tab opens immediately when you click any bookmark.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#128274;</div>
+        <h3>Privacy First</h3>
+        <p>No data collected. No analytics. Everything stays on your device.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#9881;&#65039;</div>
+        <h3>Customizable</h3>
+        <p>Choose tab position, focus behavior, and toggle on/off anytime.</p>
+      </div>
+    </div>
+
+    <!-- ── How It Works ─────────────────────────────────────────────── -->
+    <h2>How It Works</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text"><strong>Install</strong> the extension from the Chrome Web Store.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text"><strong>Click any bookmark</strong> in your bookmark bar or menu.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">The bookmark <strong>opens in a new tab</strong> while your current page stays untouched.</div>
+      </div>
+    </div>
+
+    <div class="highlight">
+      <strong>Note:</strong> The extension modifies your bookmark URLs with a
+      special prefix to enable the new-tab behavior. All bookmarks are
+      automatically restored to their original URLs when you disable or
+      uninstall the extension.
+    </div>
+
+    <!-- ── Footer ───────────────────────────────────────────────────── -->
+    <footer>
+      &copy; 2026 Open Bookmarks in New Tab &middot;
+      <a href="privacy-policy.html">Privacy Policy</a> &middot;
+      <a href="https://github.com/sssstf0rest/Open-Bookmarks-in-New-Tab" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </footer>
+  </main>
+
+  <script>
+    // ── Redirect Logic ──────────────────────────────────────────────────
+    // This page is used as a proxy for bookmarks on domains where Chrome
+    // strips the newtab@ userinfo (e.g. Gmail, Outlook).
+    //
+    // Normal flow (extension installed & enabled):
+    //   The declarativeNetRequest rule intercepts this URL before it loads
+    //   and redirects to empty.zip — this page never actually renders.
+    //
+    // Fallback flow (extension disabled or uninstalled):
+    //   This page loads and shows the landing page with a redirect link.
+    //   The user can click through to their bookmark destination.
+
+    (function () {
+      var redirectUrl = new URL(location.href).searchParams.get('url');
+      if (!redirectUrl) return;
+
+      // Show the redirect banner
+      var banner = document.getElementById('redirect-banner');
+      var link = document.getElementById('redirect-link');
+      banner.style.display = 'block';
+      link.href = redirectUrl;
+      link.textContent = redirectUrl;
+
+      // Auto-redirect after a short delay so the user sees the page
+      setTimeout(function () {
+        location.replace(redirectUrl);
+      }, 1500);
+    })();
+  </script>
+
+</body>
+</html>
