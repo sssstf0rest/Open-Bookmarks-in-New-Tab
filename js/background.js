@@ -76,7 +76,6 @@ const CREDENTIAL_STRIPPED_DOMAINS = [
   "outlook.live.com",        // Outlook (personal)
   "outlook.office.com",      // Outlook (work)
   "outlook.office365.com",   // Outlook (365)
-  "open.spotify.com",     // Spotify Web Player
 ];
 
 // ─── Default Settings ────────────────────────────────────────────────────────
