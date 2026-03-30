@@ -71,24 +71,11 @@ const REDIRECT_PAGE_BASE =
  * For these domains, bookmarks are wrapped via the redirect page.
  */
 const CREDENTIAL_STRIPPED_DOMAINS = [
-  // Google
-  "mail.google.com/mail/u/0/#inbox",
-  // "google.com",
-  // "gmail.com",
-  // "youtube.com",
-  // "googleapis.com",
-  // "googlevideo.com",
-  // "gstatic.com",
-  // Microsoft
-  // "microsoft.com",
-  // "cloud.microsoft",
-  // "live.com",
-  // "outlook.com",
-  "outlook.cloud.microsoft/mail/",
-  // "office.com",
-  // "office365.com",
-  // "microsoftonline.com",
-  // "sharepoint.com",
+  "mail.google.com",        // Gmail
+  "outlook.cloud.microsoft", // Outlook (new domain)
+  "outlook.live.com",        // Outlook (personal)
+  "outlook.office.com",      // Outlook (work)
+  "outlook.office365.com",   // Outlook (365)
 ];
 
 // ─── Default Settings ────────────────────────────────────────────────────────
