@@ -72,21 +72,21 @@ const REDIRECT_PAGE_BASE =
  */
 const CREDENTIAL_STRIPPED_DOMAINS = [
   // Google
-  "google.com",
+  // "google.com",
   "gmail.com",
-  "youtube.com",
-  "googleapis.com",
-  "googlevideo.com",
-  "gstatic.com",
+  // "youtube.com",
+  // "googleapis.com",
+  // "googlevideo.com",
+  // "gstatic.com",
   // Microsoft
-  "microsoft.com",
-  "cloud.microsoft",
-  "live.com",
+  // "microsoft.com",
+  // "cloud.microsoft",
+  // "live.com",
   "outlook.com",
-  "office.com",
-  "office365.com",
-  "microsoftonline.com",
-  "sharepoint.com",
+  // "office.com",
+  // "office365.com",
+  // "microsoftonline.com",
+  // "sharepoint.com",
 ];
 
 // ─── Default Settings ────────────────────────────────────────────────────────
