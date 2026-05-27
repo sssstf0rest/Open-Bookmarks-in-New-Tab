@@ -71,11 +71,12 @@ const REDIRECT_PAGE_BASE =
  * For these domains, bookmarks are wrapped via the redirect page.
  */
 const CREDENTIAL_STRIPPED_DOMAINS = [
-  "mail.google.com",        // Gmail
+  "mail.google.com",         // Gmail
   "outlook.cloud.microsoft", // Outlook (new domain)
   "outlook.live.com",        // Outlook (personal)
   "outlook.office.com",      // Outlook (work)
   "outlook.office365.com",   // Outlook (365)
+  "baidu.com",               // Baidu (Edge browser strips newtab@; covers left tab otherwise)
 ];
 
 // ─── Default Settings ────────────────────────────────────────────────────────
@@ -92,8 +93,17 @@ let settings = { ...DEFAULT_SETTINGS };
  * Tracks tab IDs that have already been handled by the webNavigation
  * onBeforeNavigate listener. This prevents the downloads.onCreated listener
  * from opening a duplicate tab for the same bookmark click.
+ *
+ * Entry shape: { cleanUrl: string, reused: boolean }
+ *   - cleanUrl: the destination URL (without newtab@ prefix)
+ *   - reused:   true if openInNewTab reused the source tab itself
+ *               (i.e. source tab was a new-tab page). When true,
+ *               onCommitted MUST NOT restore the tab — the navigation
+ *               is intentional and the final URL may differ from
+ *               cleanUrl due to server-side redirects (e.g. ChatGPT
+ *               redirects chat.openai.com → chatgpt.com).
  */
-const handledTabs = new Map(); // tabId → cleanUrl
+const handledTabs = new Map(); // tabId → { cleanUrl, reused }
 
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
@@ -386,39 +396,65 @@ chrome.bookmarks.onChanged.addListener(async (id, changeInfo) => {
 // ─── Open URL Helper ─────────────────────────────────────────────────────────
 
 /**
- * Opens a clean (prefix-stripped) URL in a new tab, or reuses the active tab
- * if it's an empty / new-tab page. Respects user settings for focus and
- * tab position.
+ * Opens a clean (prefix-stripped) URL in a new tab, or reuses the source
+ * tab if it's an empty / new-tab page. Respects user settings for focus
+ * and tab position.
  *
- * @param {string} cleanUrl  The destination URL (without newtab@ prefix).
+ * @param {string} cleanUrl       The destination URL (without newtab@ prefix).
+ * @param {number} [sourceTabId]  Optional tab ID where the bookmark was clicked.
+ *                                If provided and that tab is a new-tab page,
+ *                                it will be reused for the navigation.
+ * @returns {Promise<{ reused: boolean }>}
+ *   reused = true means the SOURCE tab was navigated directly (no new tab
+ *   created). In that case, onCommitted must NOT try to restore the tab.
  */
-async function openInNewTab(cleanUrl) {
+async function openInNewTab(cleanUrl, sourceTabId) {
   try {
-    const [activeTab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-
-    if (activeTab && isNewTabPage(activeTab.url)) {
-      // Reuse the empty tab — navigate it to the bookmark URL
-      await chrome.tabs.update(activeTab.id, { url: cleanUrl });
-    } else {
-      // Normal case — open in a new tab
-      let createOptions = {
-        url: cleanUrl,
-        active: settings.focusNewTab,
-      };
-
-      // Determine tab placement
-      if (settings.position === "right" && activeTab) {
-        createOptions.index = activeTab.index + 1;
+    // Try to get the exact source tab first (most reliable)
+    let sourceTab = null;
+    if (sourceTabId !== undefined) {
+      try {
+        sourceTab = await chrome.tabs.get(sourceTabId);
+      } catch {
+        // Tab may have been closed in the meantime
       }
-      // "end" is the default — Chrome appends to the end of the tab bar
-
-      await chrome.tabs.create(createOptions);
     }
+
+    // Fallback: use the active tab in the current window
+    if (!sourceTab) {
+      const [activeTab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      sourceTab = activeTab;
+    }
+
+    // Reuse the source tab if it's a new-tab page — single-tab UX
+    if (sourceTab && isNewTabPage(sourceTab.url)) {
+      await chrome.tabs.update(sourceTab.id, { url: cleanUrl });
+      // Only report "reused" if it's the SAME tab the bookmark click
+      // originated from. That's the tab whose onCommitted we need to skip.
+      const reused = sourceTabId !== undefined && sourceTab.id === sourceTabId;
+      return { reused };
+    }
+
+    // Normal case — open in a new tab
+    let createOptions = {
+      url: cleanUrl,
+      active: settings.focusNewTab,
+    };
+
+    // Determine tab placement
+    if (settings.position === "right" && sourceTab) {
+      createOptions.index = sourceTab.index + 1;
+    }
+    // "end" is the default — Chrome appends to the end of the tab bar
+
+    await chrome.tabs.create(createOptions);
+    return { reused: false };
   } catch (err) {
     console.warn("[Bookmarks→NewTab] Error opening new tab:", err);
+    return { reused: false };
   }
 }
 
@@ -437,14 +473,24 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   const cleanUrl = removePrefix(details.url);
   if (!cleanUrl) return;
 
-  // Mark this tab as handled so the download listener skips it
-  handledTabs.set(details.tabId, cleanUrl);
+  // Mark this tab as handled IMMEDIATELY (before any await) so the
+  // download listener and onCommitted both see the entry. We start with
+  // reused=false; openInNewTab may upgrade it to true below.
+  handledTabs.set(details.tabId, { cleanUrl, reused: false });
 
   // Clean up the entry after 10 seconds to avoid memory leaks
   setTimeout(() => handledTabs.delete(details.tabId), 10000);
 
-  // Open the real URL in a new tab immediately
-  await openInNewTab(cleanUrl);
+  // Open the real URL in a new tab (or reuse the source tab if it's empty)
+  const { reused } = await openInNewTab(cleanUrl, details.tabId);
+
+  // If openInNewTab reused the source tab itself, update the flag so
+  // onCommitted knows to skip the restore logic (the source tab IS the
+  // destination tab now — don't goBack/remove it).
+  if (reused) {
+    const entry = handledTabs.get(details.tabId);
+    if (entry) handledTabs.set(details.tabId, { ...entry, reused: true });
+  }
 });
 
 // ─── Download Interception (Safety Net) ──────────────────────────────────────
@@ -505,7 +551,7 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     return;
   }
 
-  await openInNewTab(cleanUrl);
+  await openInNewTab(cleanUrl, downloadItem.tabId);
 });
 
 // ─── Fallback: webNavigation Safety Net ──────────────────────────────────────
@@ -533,20 +579,23 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   const urlHasPrefix = hasPrefix(details.url);
   const handled = handledTabs.get(details.tabId);
 
+  // ── Tab was intentionally reused by openInNewTab ────────────────────
+  // The source tab itself was a new-tab page and we navigated it directly
+  // to the bookmark URL. Do NOT restore — the current commit IS the
+  // intended destination (or a post-redirect URL like ChatGPT going from
+  // chat.openai.com → chatgpt.com, baidu.com → www.baidu.com, etc.).
+  if (handled && handled.reused) {
+    handledTabs.delete(details.tabId);
+    return;
+  }
+
   // ── Case B: prefix was stripped by Chrome (Gmail, Outlook, etc.) ────
   // onBeforeNavigate already opened a new tab. The current tab navigated
   // to the clean URL because Chrome stripped newtab@ before
   // declarativeNetRequest could redirect it. We need to undo this
   // navigation so the current tab goes back to where it was.
-  //
-  // Exception: if the committed URL matches the handled cleanUrl, it
-  // means openInNewTab() reused this tab (it was a new-tab page) and
-  // navigated it directly to the bookmark destination. Don't restore.
   if (!urlHasPrefix && handled) {
     handledTabs.delete(details.tabId);
-
-    // Tab was reused by openInNewTab — nothing to restore
-    if (details.url === handled) return;
 
     const tabId = details.tabId;
 
@@ -573,9 +622,6 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // If onBeforeNavigate already opened the new tab, just restore this tab
   if (handled) {
     handledTabs.delete(details.tabId);
-
-    // Tab was reused by openInNewTab — nothing to restore
-    if (removePrefix(details.url) === handled) return;
 
     const tabId = details.tabId;
 
