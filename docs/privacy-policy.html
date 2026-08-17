@@ -180,7 +180,7 @@
     /* ── Links ──────────────────────────────────────────────────────────── */
     a {
       color: var(--accent);
-      text-decoration: none;
+      text-decoration: underline;
       transition: opacity 0.15s ease;
     }
     a:hover {
@@ -211,7 +211,7 @@
   <main>
     <!-- ── Header ───────────────────────────────────────────────────── -->
     <div class="header">
-      <div class="header-icon">
+      <div class="header-icon" aria-hidden="true">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -223,7 +223,7 @@
 
     <p class="meta">
       <strong>Open Bookmarks in New Tab</strong> &mdash; Chrome Extension<br />
-      Last updated: March 1, 2026
+      Last updated: August 17, 2026
     </p>
 
     <!-- ── 1. Overview ──────────────────────────────────────────────── -->
@@ -238,16 +238,21 @@
     <!-- ── 2. Data Collection ───────────────────────────────────────── -->
     <h2>2. Data Collection</h2>
     <div class="highlight">
-      <strong>This extension does NOT collect, transmit, or store any
-      personal data.</strong> It does not use analytics, tracking,
-      cookies, or any third-party services.
+      <strong>The developer does not collect or receive personal data through
+      this extension.</strong> It uses no analytics, tracking, advertising,
+      remote code, or runtime third-party service.
     </div>
     <p>
-      The only data stored by the extension is your local preferences
-      (enabled/disabled state, tab focus setting, and tab position).
-      These preferences are saved entirely on your device using
-      <code>chrome.storage.local</code> and are
-      <strong>never sent to any external server</strong>.
+      The extension processes bookmark URLs locally so it can add and remove a
+      reversible marker. Behavior and language preferences may be synchronized
+      between the user's signed-in Chrome profiles through
+      <code>chrome.storage.sync</code>, along with a randomly generated 128-bit
+      marker-owner key used to recognize the extension's own bookmark markers.
+      Transition state and, during a version 2.3 migration, a size-limited
+      backup containing as many affected bookmark URLs as fit stay in
+      <code>chrome.storage.local</code>. The backup is removed on the first
+      extension startup at least 30 days after it was created. None of this
+      data is sent to the developer.
     </p>
 
     <!-- ── 3. Permissions ───────────────────────────────────────────── -->
@@ -269,90 +274,57 @@
         <tr>
           <td>bookmarks</td>
           <td>
-            Required to read and modify bookmark URLs by adding a
-            <code>newtab@</code> username prefix. This prefix is the
-            mechanism that allows the extension to identify
-            bookmark-triggered navigations and redirect them to new
-            tabs. When the extension is disabled, all bookmark URLs
-            are restored to their original state.
+            Reads and modifies HTTP(S) bookmark URLs to add or remove the
+            <code>__obnt_v4</code> marker. It contains a random
+            installation-scoped owner, a migration-provenance flag, and a
+            random 256-bit per-bookmark nonce. The extension also migrates the
+            released <code>newtab@</code> format. Pausing from the popup restores
+            current-format URLs.
           </td>
         </tr>
         <tr>
           <td>tabs</td>
           <td>
-            Required to create new tabs when a bookmark is clicked,
-            and to manage tab focus and position (end of tab bar or
-            right of current tab). Also used to determine the current
-            tab's index for correct placement.
+            Creates and positions one destination tab, or reuses the exact
+            empty source tab. The current source-tab URL and placement metadata
+            are valid for recovery for up to 15 seconds and remain only in
+            transient service-worker memory so concurrent folder tabs can be
+            handled without changing an unrelated active tab.
           </td>
         </tr>
         <tr>
           <td>webNavigation</td>
           <td>
-            Used to detect bookmark-triggered navigations via the
-            <code>onCommitted</code> event with
-            <code>transitionType: "auto_bookmark"</code>. This
-            distinguishes bookmark clicks from regular navigation.
-            No browsing history is collected or stored.
-          </td>
-        </tr>
-        <tr>
-          <td>downloads</td>
-          <td>
-            Part of the core mechanism that preserves the current
-            tab. When a bookmark is clicked, the modified URL
-            triggers a download of a small empty file bundled with
-            the extension. The extension immediately detects and
-            cancels this download via
-            <code>chrome.downloads.onCreated</code>, then opens the
-            original URL in a new tab. No actual file is saved to
-            the user's device.
+            Detects marked top-level navigations before commit. The event URL
+            is handled transiently and is not retained as browsing history by
+            the extension.
           </td>
         </tr>
         <tr>
           <td>declarativeNetRequest</td>
           <td>
-            Used to redirect requests containing the
-            <code>newtab@</code> username marker to an internal
-            <code>empty.zip</code> file. This redirect triggers
-            the download-based mechanism instead of a page
-            navigation, ensuring the current tab stays untouched.
-            Only URLs with the specific prefix are matched — no
-            other web traffic is affected.
-          </td>
-        </tr>
-        <tr>
-          <td>alarms</td>
-          <td>
-            Used to periodically wake the extension's service worker
-            (every 30 seconds) so the downloads listener remains
-            active. Chrome suspends inactive service workers, which
-            would cause the download-interception mechanism to fail.
-            The alarm performs no data collection or network
-            requests.
+            Redirects only a top-level URL ending in this extension's exact
+            marker to the bundled <code>cancel.html</code> resource. The local
+            service worker returns HTTP 204, cancelling that marked source
+            request without creating a dummy download. The clean destination is
+            then requested normally in the destination tab while the extension
+            is active in a supported regular window.
           </td>
         </tr>
         <tr>
           <td>storage</td>
           <td>
-            Used to persist user preferences locally on the device
-            using <code>chrome.storage.local</code>. Stored settings
-            include: enabled/disabled state, focus preference, and
-            tab position. No personal data is stored. No data is
-            transmitted externally.
+            Synchronizes behavior and language preferences plus the random
+            marker-owner key through Chrome, and stores migration/transition
+            state plus the temporary legacy backup locally.
           </td>
         </tr>
         <tr>
           <td>Host permissions</td>
           <td>
-            Required for <code>declarativeNetRequest</code> redirect
-            rules to function. The extension needs to intercept
-            requests from any URL that contains the
-            <code>newtab@</code> username prefix (which the
-            extension itself adds). Without host permissions, the
-            redirect rules cannot match these requests. The
-            extension does not read, modify, or collect any page
-            content.
+            HTTP(S)-only host access lets DNR and <code>webNavigation</code>
+            match marked bookmarks on any web host. The extension does not
+            read or alter page content.
           </td>
         </tr>
       </tbody>
@@ -361,34 +333,41 @@
     <!-- ── 4. Third-Party Services ──────────────────────────────────── -->
     <h2>4. Third-Party Services</h2>
     <p>
-      This extension does not use any third-party services, APIs,
-      analytics platforms, advertising networks, or tracking tools
-      of any kind.
+      This extension does not integrate any developer-operated third-party
+      service, API, analytics platform, advertising network, or tracking tool.
+      Chrome may synchronize preferences through the user's signed-in browser
+      profile; that browser feature is operated by Google, not the developer.
     </p>
 
     <!-- ── 5. Data Sharing ──────────────────────────────────────────── -->
     <h2>5. Data Sharing</h2>
     <p>
-      No data is shared with any third party. No data leaves your
-      device. The extension operates entirely locally.
+      The developer does not receive bookmark URLs, settings, or migration
+      backups. A marked source request is cancelled locally before reaching its
+      destination while the extension is active. The clean destination URL is
+      then requested normally from that website in a new or reused empty tab.
+      The extension does not run in incognito windows, and Chrome cannot run
+      cleanup during direct disable or uninstall. Pause from the popup before
+      using bookmarks incognito, disabling, or uninstalling so no marker remains
+      as an ordinary website query parameter.
     </p>
 
     <!-- ── 6. Data Security ─────────────────────────────────────────── -->
     <h2>6. Data Security</h2>
     <p>
-      Since no personal data is collected or transmitted, there are
-      no data security risks associated with this extension beyond
-      standard browser security. User preferences are stored using
-      Chrome's built-in <code>chrome.storage.local</code> API, which
-      is sandboxed and protected by the browser.
+      Preferences and the random marker-owner key use Chrome's synchronized
+      extension storage. Transition state and time-limited migration backups use
+      local extension storage. These records are accessible only to this
+      extension under normal browser security. The extension minimizes retained
+      state and does not transmit it to a developer-controlled service.
     </p>
 
     <!-- ── 7. Remote Code ───────────────────────────────────────────── -->
     <h2>7. Remote Code</h2>
     <p>
       This extension does not use any remote code. All JavaScript is
-      bundled locally within the extension package. There are no
-      external <code>&lt;script&gt;</code> tags, no dynamically
+      bundled locally within the extension package. There are no external
+      <code>&lt;script&gt;</code> tags, no dynamically
       loaded modules, and no use of <code>eval()</code> or similar
       functions.
     </p>
@@ -396,9 +375,8 @@
     <!-- ── 8. Children's Privacy ────────────────────────────────────── -->
     <h2>8. Children's Privacy</h2>
     <p>
-      This extension does not collect any data from anyone, including
-      children under the age of 13. It is suitable for users of all
-      ages.
+      The developer does not collect personal data from anyone through this
+      extension, including children under the age of 13.
     </p>
 
     <!-- ── 9. Changes to This Policy ────────────────────────────────── -->
@@ -425,7 +403,7 @@
     <p>
       If you have any questions or concerns about this privacy
       policy, please contact the developer at:<br />
-      <a href="mailto:your-email@example.com">haoshen0226@gmail.com</a>
+      <a href="mailto:haoshen0226@gmail.com">haoshen0226@gmail.com</a>
     </p>
 
     <!-- ── Footer ───────────────────────────────────────────────────── -->

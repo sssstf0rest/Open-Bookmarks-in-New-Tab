@@ -205,6 +205,10 @@ body {
   font-style: italic;
 }
 
+.toggle-row__hint--error {
+  color: #ff9b9b;
+}
+
 /* ── Toggle Switch ─────────────────────────────────────────────────────────── */
 .switch {
   position: relative;
@@ -274,6 +278,10 @@ body {
   outline-offset: 2px;
 }
 
+.switch input:disabled + .switch__slider {
+  cursor: not-allowed;
+}
+
 /* ── Select Row ────────────────────────────────────────────────────────────── */
 .select-row {
   display: flex;
@@ -317,6 +325,10 @@ body {
 .select-row__select option {
   background: #1e293b;
   color: var(--text-primary);
+}
+
+.select-row__select:disabled {
+  cursor: not-allowed;
 }
 
 /* ── Settings Card — Disabled State ────────────────────────────────────────── */

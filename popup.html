@@ -14,7 +14,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Open Bookmarks in New Tab</title>
+  <title data-i18n="documentTitle">Open Bookmarks in New Tab</title>
   <link rel="stylesheet" href="css/popup.css" />
 </head>
 <body>
@@ -29,20 +29,27 @@
       </svg>
     </div>
     <h1 class="header__title" data-i18n="title">Bookmarks → New Tab</h1>
-    <div class="lang-switch" aria-label="Language switch">
-      <button class="lang-switch__btn lang-switch__btn--active" id="lang-en">EN</button>
-      <span class="lang-switch__sep">|</span>
-      <button class="lang-switch__btn" id="lang-zh">CH</button>
+    <div class="lang-switch" role="group" aria-label="Language switch"
+         data-i18n-aria-label="languageSwitch">
+      <button class="lang-switch__btn lang-switch__btn--active" id="lang-en"
+              type="button" aria-pressed="true" aria-label="Use English"
+              data-i18n-aria-label="langEnLabel">EN</button>
+      <span class="lang-switch__sep" aria-hidden="true">|</span>
+      <button class="lang-switch__btn" id="lang-zh" type="button"
+              aria-pressed="false" aria-label="Use Simplified Chinese"
+              data-i18n-aria-label="langZhLabel">CH</button>
     </div>
   </header>
 
   <!-- ── Main Toggle ────────────────────────────────────────────────────── -->
   <main class="main" role="main">
-    <section class="card" aria-label="Extension toggle">
+    <section class="card" aria-label="Extension toggle"
+             data-i18n-aria-label="extensionToggleLabel">
       <div class="toggle-row">
         <div class="toggle-row__info">
           <span class="toggle-row__label" id="toggle-label" data-i18n="extEnabled">Extension Enabled</span>
-          <span class="toggle-row__hint" id="status-text" data-i18n="statusOn">
+          <span class="toggle-row__hint" id="status-text" data-i18n="statusOn"
+                role="status" aria-live="polite" aria-atomic="true">
             Bookmarks open in a new tab
           </span>
         </div>
@@ -52,7 +59,8 @@
         -->
         <label class="switch" for="enabled-toggle">
           <input type="checkbox" id="enabled-toggle" role="switch"
-                 aria-labelledby="toggle-label" checked />
+                 aria-labelledby="toggle-label" aria-describedby="status-text"
+                 aria-busy="false" checked />
           <span class="switch__slider" aria-hidden="true"></span>
         </label>
       </div>
@@ -60,7 +68,8 @@
 
     <!-- ── Settings ───────────────────────────────────────────────────── -->
     <section class="card settings-card" id="settings-section"
-             aria-label="Settings">
+             aria-label="Settings" data-i18n-aria-label="settingsLabel"
+             aria-disabled="false" aria-busy="false">
       <h2 class="card__heading" data-i18n="settings">Settings</h2>
 
       <!-- Focus new tab toggle -->
@@ -81,7 +90,8 @@
           New tab position
         </label>
         <select id="position-select" class="select-row__select"
-                aria-label="Choose where the new tab appears">
+                aria-label="Choose where the new tab appears"
+                data-i18n-aria-label="positionSelectLabel">
           <option value="end" data-i18n="posEnd">End of tab bar</option>
           <option value="right" data-i18n="posRight">Right of current tab</option>
         </select>
@@ -91,7 +101,7 @@
     <!-- ── Footer ─────────────────────────────────────────────────────── -->
     <footer class="footer" role="contentinfo">
       <p class="footer__text" data-i18n="tip">
-        Tip: You can still Ctrl+Click or middle-click bookmarks to open
+        Tip: You can still Ctrl/⌘+Click or middle-click bookmarks to open
         them in a new tab manually.
       </p>
     </footer>

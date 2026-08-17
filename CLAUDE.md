@@ -4,11 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Chrome extension (Manifest V3) that opens bookmarks in a new tab without touching the current page. Uses the "newtab@ prefix" trick: bookmark URLs are rewritten with a `newtab@` userinfo marker, a `declarativeNetRequest` rule redirects them to a dummy `empty.zip` download, the `downloads` API cancels it instantly and opens the real URL in a new tab. The current tab is never navigated.
+This is a dependency-free Chrome Manifest V3 extension that opens HTTP(S)
+bookmarks in a new tab while preserving the source page. Enabled bookmarks use
+a final `__obnt_v4` query marker with a synchronized random
+installation-scoped 128-bit owner, an `m`/`p` provenance flag, and a separate
+256-bit random nonce per bookmark. A dynamic DNR rule and a local, HTML-typed
+HTTP 204 cancel the marked source
+navigation without creating a download; `webNavigation` opens the clean
+destination once after exact bookmark verification.
 
 ## Development
 
-No build step — plain HTML/CSS/JS loaded directly by Chrome. To test:
+There is no build step. Validate JavaScript, the manifest, and deterministic
+tests before loading the repository in Chrome:
+
+```sh
+node --check js/background.js
+node --check js/url-utils.js
+node --check js/popup.js
+node tests/url-utils.test.js
+node tests/background.test.js
+python3 -m json.tool manifest.json >/dev/null
+```
+
+For an interactive check (Chrome 151 or newer):
 
 1. Go to `chrome://extensions/`, enable Developer mode
 2. Click "Load unpacked" and select this folder
@@ -16,35 +35,43 @@ No build step — plain HTML/CSS/JS loaded directly by Chrome. To test:
 
 ## Architecture
 
-**background.js** (service worker) — core logic:
-- On install/enable: walks bookmark tree and adds `newtab@` prefix to all http(s) URLs
-- On disable: strips prefix from all bookmarks to restore them
-- `bookmarks.onCreated`/`onChanged` listeners auto-prefix new/edited bookmarks
-- `downloads.onCreated` listener catches the dummy empty.zip download, cancels it, extracts original URL from `referrer`, opens in new tab
-- `alarms` keep-alive (every 30s) prevents service worker termination
-- Exposes `getSettings` / `updateSettings` message API for the popup
+**`js/background.js`** is the service worker. It serializes bookmark
+maintenance, installs dynamic interception rules, serves `cancel.html` as a
+204, and owns destination creation/reuse from
+`webNavigation.onBeforeNavigate`. It also migrates released `newtab@` and
+GitHub Pages proxy bookmarks with a size-limited local backup.
 
-**rules.json** — declarativeNetRequest rule:
-- Matches `^https?://newtab@` on main_frame requests
-- Redirects to extension's `empty.zip` (triggers download, not navigation)
+**`js/url-utils.js`** implements byte-preserving current and legacy URL
+transforms. Keep it browser-global/CommonJS compatible so the same functions
+can be covered by Node tests.
 
-**popup.js** — UI controller:
-- Communicates with background via `chrome.runtime.sendMessage()`
-- Binds toggle/select controls to settings updates
-- Shows busy state during enable/disable (bookmark rewriting takes a moment)
-- Manages visual enabled/disabled state
+**`js/popup.js`**, **`popup.html`**, and **`css/popup.css`** implement the
+bilingual settings UI. The popup communicates with the worker through
+`getSettings` and `updateSettings` messages.
 
-**Settings object** (`chrome.storage.local` key: `"settings"`):
+**Settings object** (`chrome.storage.sync` key: `"settings"`):
+
 - `enabled` (bool) — extension active
 - `focusNewTab` (bool) — whether new tab gets focus
 - `position` ("end" | "right") — new tab placement
 
+Marker ownership and migration provenance use `chrome.storage.sync` key
+`"syncStateV4"`. Runtime transition/migration state and legacy backups stay in
+`chrome.storage.local`.
+
 ## Key Constraints
 
-- Bookmark URLs are modified in-place; disabling the extension restores them
-- Only `http://` and `https://` URLs can be prefixed; internal URLs (`chrome://`, `edge://`) are left unchanged
-- Service worker must stay alive for the downloads listener — uses a 30s alarm
-- The `referrer` field on the download item carries the original `newtab@` URL
+- Bookmark URLs are modified in place; pause from the popup to restore them
+  before directly disabling or uninstalling the extension.
+- Only HTTP(S) bookmark URLs are marked. Browser-internal, file, data, and
+  JavaScript URLs remain unchanged.
+- Current capabilities must be exactly 32 lowercase hex owner characters,
+  `_m_` or `_p_`, then 64 lowercase hex nonce characters, and must be the final
+  query parameter. DNR rules are owner-specific; do not broaden their scope.
+- `webNavigation` is the sole owner of destination creation. Do not add a
+  second navigation or download listener for the same click.
+- MV3 workers may stop between events. Persist long-running transition state
+  and make bookmark rewrites resumable and idempotent.
 - Popup width is fixed at 320px per Chrome popup constraints
 - CSS uses a dark theme with CSS custom properties defined in `:root`
 

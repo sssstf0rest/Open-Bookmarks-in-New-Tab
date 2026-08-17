@@ -1,36 +1,28 @@
 {
   "manifest_version": 3,
   "name": "Open Bookmarks in New Tab",
-  "version": "2.3.0",
-  "description": "Automatically opens clicked bookmarks in a new tab, preserving your current page.",
+  "version": "2.4.0",
+  "minimum_chrome_version": "151",
+  "description": "Opens HTTP(S) bookmarks in a new tab while preserving the current page.",
+  "incognito": "not_allowed",
   "permissions": [
     "bookmarks",
     "tabs",
     "storage",
-    "downloads",
     "declarativeNetRequest",
-    "alarms",
     "webNavigation"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "js/background.js"
   },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "newtab_redirect",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "web_accessible_resources": [
     {
-      "resources": ["empty.zip"],
-      "matches": ["<all_urls>"]
+      "resources": ["cancel.html"],
+      "matches": ["http://*/*", "https://*/*"]
     }
   ],
   "action": {

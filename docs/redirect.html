@@ -23,8 +23,6 @@
       --accent-dim:  rgba(79, 195, 247, 0.12);
       --border:      rgba(255, 255, 255, 0.06);
       --radius:      12px;
-      --green:       #4ade80;
-      --green-dim:   rgba(74, 222, 128, 0.12);
     }
 
     /* ── Page ───────────────────────────────────────────────────────────── */
@@ -80,21 +78,26 @@
 
     /* ── Redirect Banner ────────────────────────────────────────────────── */
     .redirect-banner {
-      background: var(--green-dim);
-      border: 1px solid rgba(74, 222, 128, 0.25);
+      background: var(--accent-dim);
+      border: 1px solid rgba(79, 195, 247, 0.3);
       border-radius: 10px;
       padding: 1.25rem 1.5rem;
       margin-bottom: 2rem;
       text-align: center;
       display: none;
     }
-    .redirect-banner p {
-      color: var(--green);
+    .redirect-banner__title {
+      color: var(--accent);
       font-weight: 600;
-      margin-bottom: 0.25rem;
+      margin-bottom: 0.5rem;
+    }
+    .redirect-banner__warning {
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-bottom: 0.75rem;
     }
     .redirect-banner a {
-      color: var(--green);
+      color: var(--accent);
       text-decoration: underline;
       word-break: break-all;
     }
@@ -245,15 +248,24 @@
 <body>
 
   <main>
-    <!-- ── Redirect Banner (shown when ?url= param exists) ──────────── -->
-    <div class="redirect-banner" id="redirect-banner">
-      <p>Redirecting you to your bookmark...</p>
-      <a id="redirect-link" href="#">Loading...</a>
+    <!-- ── Legacy recovery (shown when a valid ?url= param exists) ─── -->
+    <div class="redirect-banner" id="redirect-banner" role="region"
+         aria-labelledby="redirect-title">
+      <p class="redirect-banner__title" id="redirect-title">
+        Legacy bookmark recovery
+      </p>
+      <p class="redirect-banner__warning">
+        Review the destination before continuing. This page is used only by
+        extension versions through 2.3. Because the destination was included
+        in this page's query string, GitHub Pages has already received the
+        wrapper URL. Nothing will open automatically.
+      </p>
+      <a id="redirect-link" href="#" rel="noreferrer">Open destination</a>
     </div>
 
     <!-- ── Header ───────────────────────────────────────────────────── -->
     <div class="header">
-      <div class="header-icon">
+      <div class="header-icon" aria-hidden="true">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -261,7 +273,7 @@
         </svg>
       </div>
       <h1>Open Bookmarks in New Tab</h1>
-      <p class="tagline">Keep your current page. Every bookmark opens in a new tab.</p>
+      <p class="tagline">Open supported HTTP(S) bookmarks while preserving your current page.</p>
     </div>
 
     <!-- ── CTA ──────────────────────────────────────────────────────── -->
@@ -280,18 +292,18 @@
     <div class="features">
       <div class="feature">
         <div class="feature-icon">&#128640;</div>
-        <h3>Zero Disruption</h3>
-        <p>YouTube keeps playing, forms stay filled, Spotify never stops.</p>
+        <h3>No Dummy Downloads</h3>
+        <p>The marked source request is cancelled locally; no empty ZIP is created.</p>
       </div>
       <div class="feature">
         <div class="feature-icon">&#9889;</div>
-        <h3>Instant</h3>
-        <p>New tab opens immediately when you click any bookmark.</p>
+        <h3>One Destination</h3>
+        <p>Each supported HTTP(S) bookmark opens once in a new or reused empty tab.</p>
       </div>
       <div class="feature">
         <div class="feature-icon">&#128274;</div>
         <h3>Privacy First</h3>
-        <p>No data collected. No analytics. Everything stays on your device.</p>
+        <p>No analytics or developer data collection. Preferences may use Chrome Sync.</p>
       </div>
       <div class="feature">
         <div class="feature-icon">&#9881;&#65039;</div>
@@ -309,19 +321,19 @@
       </div>
       <div class="step">
         <div class="step-num">2</div>
-        <div class="step-text"><strong>Click any bookmark</strong> in your bookmark bar or menu.</div>
+        <div class="step-text"><strong>Click an HTTP(S) bookmark</strong> in your bookmark bar or menu.</div>
       </div>
       <div class="step">
         <div class="step-num">3</div>
-        <div class="step-text">The bookmark <strong>opens in a new tab</strong> while your current page stays untouched.</div>
+        <div class="step-text">The destination <strong>opens in a new tab</strong>, or reuses the exact blank source tab when configured. A non-empty source page remains loaded.</div>
       </div>
     </div>
 
     <div class="highlight">
       <strong>Note:</strong> The extension modifies your bookmark URLs with a
-      special prefix to enable the new-tab behavior. All bookmarks are
-      automatically restored to their original URLs when you disable or
-      uninstall the extension.
+      reversible query marker to enable the new-tab behavior. Pause it from the
+      popup before disabling or uninstalling so current-format bookmarks are
+      restored first.
     </div>
 
     <!-- ── Footer ───────────────────────────────────────────────────── -->
@@ -333,33 +345,29 @@
   </main>
 
   <script>
-    // ── Redirect Logic ──────────────────────────────────────────────────
-    // This page is used as a proxy for bookmarks on domains where Chrome
-    // strips the newtab@ userinfo (e.g. Gmail, Outlook).
+    // ── Legacy Recovery Link ────────────────────────────────────────────
+    // Versions through 2.3 used this page as a proxy for domains where Chrome
+    // stripped the released newtab@ marker. Version 2.4 no longer creates
+    // these links, but this fallback keeps unmigrated bookmarks recoverable.
     //
-    // Normal flow (extension installed & enabled):
-    //   The declarativeNetRequest rule intercepts this URL before it loads
-    //   and redirects to empty.zip — this page never actually renders.
-    //
-    // Fallback flow (extension disabled or uninstalled):
-    //   This page loads and shows the landing page with a redirect link.
-    //   The user can click through to their bookmark destination.
-
     (function () {
       var redirectUrl = new URL(location.href).searchParams.get('url');
       if (!redirectUrl) return;
 
-      // Show the redirect banner
+      try {
+        var parsed = new URL(redirectUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+      } catch (error) {
+        return;
+      }
+
+      // Show an explicit recovery link. Never navigate automatically: this
+      // legacy wrapper may contain sensitive URL query data.
       var banner = document.getElementById('redirect-banner');
       var link = document.getElementById('redirect-link');
       banner.style.display = 'block';
       link.href = redirectUrl;
-      link.textContent = redirectUrl;
-
-      // Auto-redirect after a short delay so the user sees the page
-      setTimeout(function () {
-        location.replace(redirectUrl);
-      }, 1500);
+      link.textContent = 'Open destination: ' + redirectUrl;
     })();
   </script>
 
