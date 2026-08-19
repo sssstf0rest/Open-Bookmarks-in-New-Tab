@@ -223,7 +223,7 @@
 
     <p class="meta">
       <strong>Open Bookmarks in New Tab</strong> &mdash; Chrome Extension<br />
-      Last updated: August 17, 2026
+      Last updated: August 19, 2026
     </p>
 
     <!-- ── 1. Overview ──────────────────────────────────────────────── -->
@@ -309,6 +309,17 @@
             request without creating a dummy download. The clean destination is
             then requested normally in the destination tab while the extension
             is active in a supported regular window.
+          </td>
+        </tr>
+        <tr>
+          <td>alarms</td>
+          <td>
+            Schedules a periodic no-op wake-up while the extension is enabled,
+            so the service worker is already running when a bookmark is
+            clicked. Without it the browser must start the worker before the
+            marked request can be cancelled, which leaves the page you are
+            reading waiting. The alarm carries no data and does nothing when it
+            fires; pausing the extension clears it.
           </td>
         </tr>
         <tr>

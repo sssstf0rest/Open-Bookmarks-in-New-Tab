@@ -25,6 +25,11 @@ Gmail/Outlook GitHub Pages proxy, repairs repeated prefixes, and keeps a
 size-limited local migration backup. The extension removes that backup on the first
 extension startup at least 30 days after it was created.
 
+Version 2.5 repairs bookmarks that earlier migrations left in a 2.3 shape,
+never navigates a loaded source tab when a marked click cannot be matched to a
+bookmark, reuses the tab Chrome itself opens for a Ctrl/⌘ or middle click, and
+keeps the service worker resident so a click is not waiting on it to start.
+
 ## Features
 
 - No `empty.zip`, download prompt, download bubble, or download-manager API
@@ -76,6 +81,12 @@ HTTP(S) bookmarks.
 - **Visible marker:** While enabled, bookmark properties show the
   `__obnt_v4` query marker. It contains random ownership values, not browsing
   data, and is removed before the destination request.
+- **Bookmark favicons:** Chrome stores a favicon against the exact page URL
+  that committed. A marked bookmark URL never commits — cancelling it is what
+  keeps the source page loaded — so Chrome has no icon recorded for it and the
+  bookmarks bar falls back to a generic one. Pausing restores the original
+  URLs and their icons. A bookmark that still shows its icon while the
+  extension is enabled is one that is not being intercepted.
 - **Legacy `newtab` username:** During a 2.3-or-earlier upgrade, a passwordless
   username exactly equal to `newtab` is indistinguishable from the released
   marker. Candidates are backed up locally before migration.
@@ -88,6 +99,7 @@ HTTP(S) bookmarks.
 
 | Permission | Purpose |
 |---|---|
+| `alarms` | Keep the worker resident while enabled so a click is not delayed by starting it |
 | `bookmarks` | Add/remove reversible markers and migrate released formats |
 | `tabs` | Open, focus, position, and recover the exact destination tab |
 | `storage` | Sync preferences and the random marker owner; keep transition state and migration backups locally |

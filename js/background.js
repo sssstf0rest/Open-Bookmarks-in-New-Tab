@@ -17,9 +17,13 @@ const SETTINGS_KEY = "settings";
 const SYNC_STATE_KEY = "syncStateV4";
 const RUNTIME_STATE_KEY = "runtimeState";
 const LEGACY_BACKUP_KEY = "legacyMigrationBackupV2";
-const SESSION_READY_KEY = "sessionReadyV5";
-const BOOKMARK_FORMAT_VERSION = 5;
+const SESSION_READY_KEY = "sessionReadyV6";
+const BOOKMARK_FORMAT_VERSION = 6;
 const CANCEL_RESOURCE = "cancel.html";
+const KEEPALIVE_ALARM = "keepAlive";
+// Chrome's shortest supported period. The worker shuts down after ~30s idle,
+// so this keeps it resident while the extension is enabled.
+const KEEPALIVE_INTERVAL_MIN = 0.5;
 const CURRENT_RULE_IDS = [1, 2, 3, 4];
 const DRAFT_V4_RULE_ID = 5;
 const PUBLIC_V3_RULE_ID = 6;
@@ -27,6 +31,7 @@ const LEGACY_RULE_ID = 7;
 const MIXED_LEGACY_RULE_IDS = [8, 9, 10, 11];
 const BOOKMARK_WRITE_CONCURRENCY = 8;
 const SOURCE_SNAPSHOT_TTL_MS = 15000;
+const FRESH_SOURCE_MS = 250;
 const EVENT_IDENTITY_TTL_MS = 10000;
 const MAX_SOURCE_SNAPSHOTS = 512;
 const MAX_EVENT_IDENTITIES = 512;
@@ -53,11 +58,16 @@ let acceptedMarkerSecrets = [];
 let syncedLegacyCompatibility = null;
 let syncedLegacyAllowAmbiguousSingle = null;
 let importInProgress = false;
+let storedSyncStateJson = null;
+let installedRuleFingerprint = null;
+let keepAliveActive = null;
 let legacyInterceptionEnabled = false;
 let publicV3InterceptionEnabled = false;
 let draftV4InterceptionEnabled = false;
 let legacyCompatibilityEnabled = false;
 let legacyAllowAmbiguousSingle = true;
+let legacyProvenanceProven = false;
+let legacyProvenanceScanned = false;
 let interceptionReadyPromise;
 let maintenanceTail = Promise.resolve();
 
@@ -79,6 +89,38 @@ self.addEventListener("fetch", (event) => {
     headers: {"Content-Type": "text/html; charset=utf-8"},
   }));
 });
+
+/**
+ * Keeps the worker resident while interception is on.
+ *
+ * The redirect target is answered by this worker's fetch handler, so a shut
+ * down worker has to boot before Chrome can abort the source navigation. That
+ * boot is not just latency before the new tab appears: the page the user is
+ * reading sits in a pending navigation until it finishes. Version 2.3 kept a
+ * worker warm for its download listener and felt faster for exactly this
+ * reason; 2.4 dropped the alarm together with the download design.
+ */
+async function syncKeepAlive(enabled) {
+  const desired = enabled === true;
+  if (keepAliveActive === desired) return;
+  keepAliveActive = desired;
+  try {
+    if (desired) {
+      await chrome.alarms.create(KEEPALIVE_ALARM, {
+        periodInMinutes: KEEPALIVE_INTERVAL_MIN,
+      });
+    } else {
+      await chrome.alarms.clear(KEEPALIVE_ALARM);
+    }
+  } catch (error) {
+    // A missing alarms permission must never break bookmark handling.
+    keepAliveActive = null;
+    console.warn("[Bookmarks→NewTab] Could not update keep-alive", error);
+  }
+}
+
+// Waking is the entire purpose; the handler intentionally does nothing.
+chrome.alarms?.onAlarm.addListener(() => {});
 
 // ─── Settings ──────────────────────────────────────────────────────────────
 
@@ -155,6 +197,7 @@ function normalizeSyncedRuntimeState(value) {
       typeof stored.legacyAllowAmbiguousSingle === "boolean"
         ? stored.legacyAllowAmbiguousSingle
         : null,
+    legacyProvenanceProven: stored.legacyProvenanceProven === true,
   };
 }
 
@@ -175,20 +218,37 @@ function applySyncedRuntimeState(value) {
   ].slice(0, CURRENT_RULE_IDS.length);
   syncedLegacyCompatibility = normalized.legacyCompatibilityEnabled;
   syncedLegacyAllowAmbiguousSingle = normalized.legacyAllowAmbiguousSingle;
+  // Provenance is a one-way latch: a device that has seen released 2.3 output
+  // must never forget it, or repaired bookmarks would be re-frozen by a peer.
+  legacyProvenanceProven = legacyProvenanceProven ||
+    normalized.legacyProvenanceProven;
   return normalized;
 }
 
+function desiredSyncedRuntimeState() {
+  return {
+    markerSecret,
+    previousMarkerSecrets: acceptedMarkerSecrets
+      .filter((secret) => secret !== markerSecret)
+      .slice(0, MAX_PREVIOUS_MARKER_SECRETS),
+    legacyCompatibilityEnabled,
+    legacyAllowAmbiguousSingle,
+    legacyProvenanceProven,
+  };
+}
+
+/**
+ * Writes synchronized ownership only when it actually changed. An
+ * unconditional write ran on every worker start, which put a sync round trip
+ * on the path of the first click after the worker had been shut down.
+ */
 async function persistSyncedRuntimeState() {
-  await chrome.storage.sync.set({
-    [SYNC_STATE_KEY]: {
-      markerSecret,
-      previousMarkerSecrets: acceptedMarkerSecrets
-        .filter((secret) => secret !== markerSecret)
-        .slice(0, MAX_PREVIOUS_MARKER_SECRETS),
-      legacyCompatibilityEnabled,
-      legacyAllowAmbiguousSingle,
-    },
-  });
+  const state = desiredSyncedRuntimeState();
+  const serialized = JSON.stringify(state);
+  if (serialized === storedSyncStateJson) return false;
+  await chrome.storage.sync.set({[SYNC_STATE_KEY]: state});
+  storedSyncStateJson = serialized;
+  return true;
 }
 
 async function readSyncedSettings() {
@@ -211,6 +271,9 @@ async function loadSettings() {
   hadStoredSettings = Boolean(storedSettings);
   settings = normalizeSettings(storedSettings);
   navigationSettings = {...settings};
+  storedSyncStateJson = synced[SYNC_STATE_KEY]
+    ? JSON.stringify(synced[SYNC_STATE_KEY])
+    : null;
   const normalizedSyncState = applySyncedRuntimeState(
     synced[SYNC_STATE_KEY]
   );
@@ -240,10 +303,14 @@ async function loadSettings() {
       previousMarkerSecrets: acceptedMarkerSecrets.slice(1),
       legacyCompatibilityEnabled: legacyProfile,
       legacyAllowAmbiguousSingle: legacyProfile,
+      legacyProvenanceProven,
     };
   }
   if (Object.keys(syncPatch).length > 0) {
     await chrome.storage.sync.set(syncPatch);
+    if (syncPatch[SYNC_STATE_KEY]) {
+      storedSyncStateJson = JSON.stringify(syncPatch[SYNC_STATE_KEY]);
+    }
   }
   return settings;
 }
@@ -368,6 +435,37 @@ async function assertRuleRegexSupported(rule) {
   }
 }
 
+const OWNED_RULE_IDS = [
+  ...CURRENT_RULE_IDS,
+  ...MIXED_LEGACY_RULE_IDS,
+  DRAFT_V4_RULE_ID,
+  PUBLIC_V3_RULE_ID,
+  LEGACY_RULE_ID,
+];
+
+/**
+ * Stable identity of the rules this extension owns, comparable between rules
+ * this worker built and rules Chrome reports as installed. Dynamic rules
+ * outlive the worker, so a restart can usually skip both the support check and
+ * the rewrite instead of putting them on the path of the next click.
+ */
+function ruleFingerprint(rules) {
+  return JSON.stringify(
+    rules
+      .filter((rule) => OWNED_RULE_IDS.includes(rule.id))
+      .map((rule) => [
+        rule.id,
+        rule.condition?.regexFilter || "",
+        rule.condition?.urlFilter || "",
+        rule.condition?.isUrlFilterCaseSensitive === true,
+        [...(rule.condition?.requestDomains || [])].sort().join(","),
+        [...(rule.condition?.resourceTypes || [])].sort().join(","),
+        rule.action?.redirect?.extensionPath || "",
+      ])
+      .sort((left, right) => left[0] - right[0])
+  );
+}
+
 async function setNavigationRules(
   enabled,
   includeLegacy = false,
@@ -389,18 +487,16 @@ async function setNavigationRules(
     ]
     : [];
 
-  await Promise.all(addRules.map(assertRuleRegexSupported));
+  const fingerprint = ruleFingerprint(addRules);
+  if (fingerprint !== installedRuleFingerprint) {
+    await Promise.all(addRules.map(assertRuleRegexSupported));
 
-  await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [
-      ...CURRENT_RULE_IDS,
-      ...MIXED_LEGACY_RULE_IDS,
-      DRAFT_V4_RULE_ID,
-      PUBLIC_V3_RULE_ID,
-      LEGACY_RULE_ID,
-    ],
-    addRules,
-  });
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: OWNED_RULE_IDS,
+      addRules,
+    });
+    installedRuleFingerprint = fingerprint;
+  }
   legacyInterceptionEnabled = enabled && includeLegacy;
   publicV3InterceptionEnabled = enabled && includePublicV3;
   draftV4InterceptionEnabled = enabled && includeDraftV4;
@@ -451,6 +547,9 @@ async function transformBookmarkNodes(nodes, transform) {
       const node = nodes[cursor];
       cursor += 1;
       try {
+        // Preview against the tree snapshot first. A steady-state pass changes
+        // nothing, and without this every bookmark costs a read even then.
+        if (node.url && transform(node.url, node) === node.url) continue;
         // Re-read just before writing so a recent user/sync edit is not lost.
         const [latest] = await chrome.bookmarks.get(node.id);
         if (!latest?.url || latest.unmodifiable) continue;
@@ -547,6 +646,67 @@ function markerModeForRawUrl(url) {
   return /^https?:\/\/newtab(?:@|%40)/i.test(url) ? "p" : "m";
 }
 
+/**
+ * True only for shapes a user cannot plausibly have typed: the exact released
+ * GitHub Pages wrapper, a repeated or percent-encoded `newtab@` prefix, or a
+ * released prefix that survived inside one of this installation's own markers.
+ * A single passwordless `newtab@` is deliberately not evidence — that is the
+ * form a legitimate Basic Auth username shares.
+ */
+function isUnambiguousLegacyEvidence(url) {
+  if (!UrlTools.isSupportedUrl(url)) return false;
+  if (UrlTools.getLegacyOriginalUrl(url, {allowAmbiguousSingle: false})) {
+    return true;
+  }
+  const marker = UrlTools.readMarker(url);
+  return Boolean(
+    isAcceptedMarker(marker) &&
+    /^https?:\/\/newtab(?:@|%40)/i.test(marker.originalUrl)
+  );
+}
+
+function detectLegacyProvenance(nodes) {
+  return nodes.some((node) => isUnambiguousLegacyEvidence(node.url));
+}
+
+async function latchLegacyProvenance() {
+  if (legacyProvenanceProven) return false;
+  legacyProvenanceProven = true;
+  legacyCompatibilityEnabled = true;
+  legacyAllowAmbiguousSingle = true;
+  await persistSyncedRuntimeState();
+  return true;
+}
+
+function looksLikeReleasedResidue(url) {
+  return typeof url === "string" && (
+    /^https?:\/\/newtab(?:@|%40)/i.test(url) ||
+    UrlTools.readLegacyRedirectTarget(url) !== null
+  );
+}
+
+/**
+ * A single `newtab@` cannot prove its own provenance, but another bookmark in
+ * the same tree often can. Scan once per worker so an ambiguous bookmark that
+ * arrives by sync is repaired immediately instead of waiting for the next
+ * browser session, and repair the rest of the tree when the proof appears.
+ */
+async function ensureLegacyProvenanceChecked() {
+  if (legacyProvenanceProven || legacyProvenanceScanned) {
+    return legacyProvenanceProven;
+  }
+  legacyProvenanceScanned = true;
+  try {
+    const tree = await chrome.bookmarks.getTree();
+    if (!detectLegacyProvenance(collectBookmarkNodes(tree))) return false;
+  } catch (error) {
+    console.warn("[Bookmarks→NewTab] Could not read bookmarks", error);
+    return false;
+  }
+  await latchLegacyProvenance();
+  return true;
+}
+
 function ensureEnabledMarker(url, options = {}) {
   if (!UrlTools.isSupportedUrl(url)) return url;
 
@@ -569,43 +729,68 @@ function ensureEnabledMarker(url, options = {}) {
     if (draftMarker) sourceUrl = draftMarker.originalUrl;
   }
 
-  // A still-running 2.3 device may place its exact redirect wrapper outside
-  // an authenticated v4 marker (notably for Gmail). Normalize that safe mixed
-  // form even after broad legacy migration has ended.
+  // Provenance proven from this profile's own bookmarks lets the ambiguous
+  // single `newtab@` form be recovered outside a schema migration too, so
+  // residue that arrives later by sync or restore is repaired instead of being
+  // frozen into a capability that preserves an unusable destination.
+  const recoverAmbiguousSingle = allowAmbiguousSingle || legacyProvenanceProven;
+  const recoverLegacy = allowLegacy || legacyProvenanceProven;
+
+  // Recovery that needs no guess: the exact retired GitHub Pages wrapper, a
+  // repeated or percent-encoded prefix, or a prefix in front of real
+  // credentials. A lone `newtab@` is excluded here because only that form is
+  // indistinguishable from a legitimate Basic Auth username.
   const safeLegacyTarget = legacyOriginal(url, false);
+
+  // A still-running 2.3 device can wrap an already authenticated marker.
+  // Recover the inner capability: preserving the released layer leaves the
+  // bookmark unusable on this device, which is the worse of the two failures.
   const nestedMarker = UrlTools.readMarker(safeLegacyTarget);
   if (isAcceptedMarker(nestedMarker)) {
-    // Preserve the wrapper while a synchronized 2.3 device may still be
-    // running. Rewriting it to the direct destination makes 2.3 immediately
-    // wrap it again, causing an endless cross-device write loop. Owner-scoped
-    // wrapper interception and pause-time unwrapping handle this form safely.
-    return url;
-  }
-  if (!options.schemaMigration && UrlTools.readLegacyRedirectTarget(url)) {
-    // The released Gmail/Outlook wrapper host and path are unambiguous. Keep
-    // the wrapper itself stable for a 2.3 peer, but authenticate it with `m`
-    // so clicks and Pause recover the encoded clean destination locally.
-    return UrlTools.markUrl(url, generateMarkerCapability("m"));
+    const recovered = UrlTools.unwrapManagedUrl(safeLegacyTarget, {
+      acceptedMarkerSecrets,
+    }) || nestedMarker.originalUrl;
+    return UrlTools.markUrl(
+      recovered,
+      generateMarkerCapability(nestedMarker.mode)
+    );
   }
 
   if (options.schemaMigration) {
     const restored = UrlTools.unwrapManagedUrl(sourceUrl, {
       acceptedMarkerSecrets,
-      allowLegacy,
-      allowAmbiguousSingle,
+      allowLegacy: recoverLegacy,
+      allowAmbiguousSingle: recoverAmbiguousSingle,
       allowDraftV4: options.allowDraftV4,
       v3MarkerToken: publicV3Token,
     }) || sourceUrl;
-    return UrlTools.markUrl(restored, generateMarkerCapability("m"));
+    // A released layer this pass was not authorized to remove keeps preserve
+    // provenance, so its bytes stay the user's rather than becoming ours.
+    return UrlTools.markUrl(
+      restored,
+      generateMarkerCapability(markerModeForRawUrl(restored))
+    );
   }
 
-  if (allowLegacy) {
-    const recovered = legacyOriginal(sourceUrl, allowAmbiguousSingle);
+  if (safeLegacyTarget) {
+    // Outside a migration pass this is the repair that keeps a retired wrapper
+    // from becoming the destination: that page stopped forwarding in 2.4, so a
+    // bookmark still pointing at it is dead however it is marked.
+    const fullyRecovered = UrlTools.unwrapManagedUrl(safeLegacyTarget, {
+      acceptedMarkerSecrets,
+      allowLegacy: recoverLegacy,
+      allowAmbiguousSingle: recoverAmbiguousSingle,
+      allowDraftV4: options.allowDraftV4,
+      v3MarkerToken: publicV3Token,
+    }) || safeLegacyTarget;
+    return UrlTools.markUrl(fullyRecovered, generateMarkerCapability("m"));
+  }
+
+  if (recoverLegacy) {
+    const recovered = legacyOriginal(sourceUrl, recoverAmbiguousSingle);
     if (recovered) {
-      // A 2.3 device may wrap a v4 Gmail bookmark. Leaving that wrapper
-      // untouched prevents two synchronized devices from rewriting forever.
       const recoveredMarker = UrlTools.readMarker(recovered);
-      if (recoveredMarker?.owner === markerSecret) return sourceUrl;
+      if (recoveredMarker?.owner === markerSecret) return recovered;
       if (isAcceptedMarker(recoveredMarker)) {
         return UrlTools.markUrl(
           recoveredMarker.originalUrl,
@@ -616,9 +801,10 @@ function ensureEnabledMarker(url, options = {}) {
         recovered,
         publicV3Token
       );
-      if (recoveredV3) {
-        return UrlTools.markUrl(recoveredV3, generateMarkerCapability("m"));
-      }
+      return UrlTools.markUrl(
+        recoveredV3 || recovered,
+        generateMarkerCapability("m")
+      );
     }
 
     const directV3 = UrlTools.getV3OriginalUrl(sourceUrl, publicV3Token);
@@ -627,8 +813,8 @@ function ensureEnabledMarker(url, options = {}) {
     }
   }
 
-  // Preserve a released legacy layer from a still-running 2.3 device and put
-  // an authenticated v4 capability outside it. The navigation path unwraps both.
+  // Without provenance a single `newtab@` may be a real Basic Auth username,
+  // so it stays inside a preserve capability and its bytes are never guessed.
   return UrlTools.markUrl(
     sourceUrl,
     generateMarkerCapability(markerModeForRawUrl(sourceUrl))
@@ -741,8 +927,9 @@ async function performReconciliation(targetSettings, options = {}) {
   const schemaMigration = options.schemaMigration === true;
   const allowDraftV4 = options.allowDraftV4 === true;
   const allowPublicV3 = options.allowPublicV3 === true;
-  const allowLegacy = options.allowLegacy === true;
-  const allowAmbiguousSingle = options.allowAmbiguousSingle !== false;
+  let allowLegacy = options.allowLegacy === true || legacyProvenanceProven;
+  let allowAmbiguousSingle = options.allowAmbiguousSingle !== false ||
+    legacyProvenanceProven;
   const desiredState = targetSettings.enabled ? "enabled" : "disabled";
 
   await updateRuntimeState({
@@ -778,6 +965,24 @@ async function performReconciliation(targetSettings, options = {}) {
   if (schemaMigration) {
     const tree = await chrome.bookmarks.getTree();
     const nodes = collectBookmarkNodes(tree);
+
+    // A profile that still holds released 2.3 output proves this extension
+    // wrote those bytes. Without that proof a lone `newtab@` stays untouched,
+    // which leaves the bookmark unintercepted and lets Chrome replace the
+    // source page with the destination on the next click.
+    if (!legacyProvenanceProven && detectLegacyProvenance(nodes)) {
+      await latchLegacyProvenance();
+      allowLegacy = true;
+      allowAmbiguousSingle = true;
+      await setNavigationRules(
+        true,
+        true,
+        true,
+        allowPublicV3,
+        allowDraftV4
+      );
+    }
+
     backup = await backupMigrationCandidates(
       nodes,
       allowAmbiguousSingle,
@@ -821,6 +1026,7 @@ async function performReconciliation(targetSettings, options = {}) {
   settings = {...targetSettings};
   navigationSettings = {...targetSettings};
   navigationEnabled = targetSettings.enabled;
+  await syncKeepAlive(targetSettings.enabled);
   await updateRuntimeState({
     bookmarkFormatVersion: BOOKMARK_FORMAT_VERSION,
     bookmarkState: desiredState,
@@ -855,10 +1061,20 @@ function reconciliationContext(runtimeState) {
     runtimeState.pendingOperation?.allowPublicV3 ||
     runtimeState.migrationMode === "legacy"
   );
-  const allowAmbiguousSingle =
-    typeof runtimeState.migrationAllowAmbiguousSingle === "boolean"
-      ? runtimeState.migrationAllowAmbiguousSingle
-      : legacyAllowAmbiguousSingle;
+  // The synchronized flags record that this account once ran 2.3; they are
+  // history, not a standing authorization. Once bookmarks carry authenticated
+  // capabilities, a lone `newtab@` is far more likely to be a real Basic Auth
+  // username than released residue, so a later format bump may only strip it
+  // on evidence found in this profile's own tree.
+  const managedByAuthenticatedSchema =
+    (runtimeState.bookmarkFormatVersion || 0) >= 4;
+  const allowAmbiguousSingle = legacyProvenanceProven || (
+    !managedByAuthenticatedSchema && (
+      typeof runtimeState.migrationAllowAmbiguousSingle === "boolean"
+        ? runtimeState.migrationAllowAmbiguousSingle
+        : legacyAllowAmbiguousSingle
+    )
+  );
   return {
     allowAmbiguousSingle,
     allowDraftV4,
@@ -1008,13 +1224,17 @@ function isNewTabPage(url) {
 
 function canReuseExactSource(source, markedUrl) {
   if (!source || source.windowClosing) return false;
-  const isRecentTransient = (
-    Number.isFinite(source.createdAt) &&
-    Date.now() - source.createdAt < SOURCE_SNAPSHOT_TTL_MS &&
-    source.pendingUrl === markedUrl &&
-    (source.url === undefined || source.url === "")
-  );
-  if (!isNewTabPage(source.url) && !isRecentTransient) return false;
+
+  // A tab Chrome opened for a Ctrl/Command or middle click reports no
+  // committed document yet, and tabs.onCreated may not have reached the worker
+  // before webNavigation did — so neither a snapshot timestamp nor a pending
+  // URL is guaranteed to be present. Absence of a committed URL is the signal
+  // that matters and it is sufficient on its own: with the tabs permission a
+  // tab that is showing a real page always reports that page's URL. Requiring
+  // more than that is what made the extension add a second tab next to the one
+  // Chrome had already opened.
+  const committedUrl = typeof source.url === "string" ? source.url : "";
+  if (!isNewTabPage(committedUrl)) return false;
   return (
     !source.pendingUrl ||
     source.pendingUrl === markedUrl ||
@@ -1023,10 +1243,20 @@ function canReuseExactSource(source, markedUrl) {
 }
 
 async function refreshSource(source, tabId) {
+  // Every field this could learn is already pushed into the snapshot by the
+  // tab listeners, so a snapshot taken moments ago is as good as a round trip
+  // and keeps one IPC off the path between the click and the new tab.
+  const cached = cachedSource(tabId);
+  if (
+    cached &&
+    !cached.removedAt &&
+    Date.now() - cached.observedAt < FRESH_SOURCE_MS
+  ) return cached;
+
   try {
     return rememberTab(await chrome.tabs.get(tabId));
   } catch {
-    return cachedSource(tabId) || source;
+    return cached || source;
   }
 }
 
@@ -1173,10 +1403,54 @@ async function createNormalDestination(destinationUrl, source, navSettings) {
 
 // ─── Single Navigation Owner ───────────────────────────────────────────────
 
-async function exactBookmarkExists(markedUrl) {
+/**
+ * Chrome canonicalizes what it stores and what it reports, so a bookmark and
+ * the navigation it produced can differ as strings while naming the same page
+ * (an added trailing slash, host or scheme case, a default port). Treat those
+ * as the same URL; anything else stays a mismatch.
+ */
+function sameBookmarkUrl(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (left === right) return true;
+  // %2f and %2F are the same byte; %2F and / are not, so only the case of an
+  // escape sequence is normalized here.
+  const canonical = (value) => new URL(value).href.replace(
+    /%[0-9a-f]{2}/gi,
+    (escape) => escape.toUpperCase()
+  );
+  try {
+    return canonical(left) === canonical(right);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Proves a marked navigation came from one of this profile's bookmarks.
+ *
+ * Failing this check is not harmless: an unverified navigation stays in its
+ * source tab, so a bookmark whose stored string merely differs from Chrome's
+ * reported URL would replace the page the user was reading. The nonce lookup
+ * is a canonicalization-proof second opinion, and it still requires the found
+ * bookmark to name the same URL, so a leaked nonce pasted onto a different
+ * address proves nothing.
+ */
+async function exactBookmarkExists(markedUrl, marker) {
   try {
     const matches = await chrome.bookmarks.search({url: markedUrl});
     if (matches.some((bookmark) => bookmark.url === markedUrl)) return true;
+    if (matches.some((bookmark) => sameBookmarkUrl(bookmark.url, markedUrl))) {
+      return true;
+    }
+    if (marker?.nonce) {
+      const byNonce = await chrome.bookmarks.search({query: marker.nonce});
+      const proven = byNonce.some((bookmark) => (
+        typeof bookmark.url === "string" &&
+        bookmark.url.includes(marker.capability) &&
+        sameBookmarkUrl(bookmark.url, markedUrl)
+      ));
+      if (proven) return true;
+    }
     pruneRecentManagedUrls();
     return recentManagedUrls.has(markedUrl);
   } catch (error) {
@@ -1218,7 +1492,10 @@ async function handleMarkedNavigation(
   markerCandidates,
   capture
 ) {
-  const verificationPromise = exactBookmarkExists(details.url);
+  const verificationPromise = exactBookmarkExists(
+    details.url,
+    markerCandidates.current
+  );
   const sourcePromise = capture.livePromise;
   const stateReady = await waitForInterceptionState();
   const acceptedCurrent = isAcceptedMarker(markerCandidates.current);
@@ -1287,6 +1564,14 @@ async function handleMarkedNavigation(
     }) || markerCandidates.current.originalUrl;
   }
   if (!originalUrl || !UrlTools.isSupportedUrl(originalUrl)) return;
+
+  // Never hand the retired GitHub Pages wrapper to a tab as a destination: it
+  // stopped forwarding in 2.4, so opening it shows a recovery page instead of
+  // the bookmark. Its host and path are exact, so the encoded target is not a
+  // guess. A preserve capability stops the generic unwrap before this point,
+  // which is how such a bookmark can still reach here.
+  const wrapperDestination = UrlTools.readLegacyRedirectTarget(originalUrl);
+  if (wrapperDestination) originalUrl = wrapperDestination;
 
   let source = await sourcePromise;
   const effectiveSettings = {...navigationSettings};
@@ -1521,10 +1806,15 @@ chrome.bookmarks.onCreated.addListener((id, bookmark) => {
     if (importInProgress) return;
     await synchronizeConfiguredSettings();
     if (!settings.enabled) return;
+    if (looksLikeReleasedResidue(bookmark.url)) {
+      if (await ensureLegacyProvenanceChecked()) {
+        return applyConfiguredState(true);
+      }
+    }
     await transformBookmarkById(
       id,
       (url) => ensureEnabledMarker(url, {
-        allowLegacy: false,
+        allowLegacy: legacyProvenanceProven,
         allowAmbiguousSingle: legacyAllowAmbiguousSingle,
       })
     );
@@ -1546,13 +1836,19 @@ chrome.bookmarks.onChanged.addListener((id, changeInfo) => {
     await synchronizeConfiguredSettings();
     const deferredUrl = deferredBookmarkUrls.get(id);
     if (!deferredUrl) return;
+    if (looksLikeReleasedResidue(deferredUrl)) {
+      if (await ensureLegacyProvenanceChecked()) {
+        deferredBookmarkUrls.delete(id);
+        return applyConfiguredState(true);
+      }
+    }
     const transform = settings.enabled
       ? (url) => ensureEnabledMarker(url, {
-        allowLegacy: false,
+        allowLegacy: legacyProvenanceProven,
         allowAmbiguousSingle: legacyAllowAmbiguousSingle,
       })
       : (url) => restoreManagedUrl(url, {
-        allowLegacy: false,
+        allowLegacy: legacyProvenanceProven,
         allowAmbiguousSingle: legacyAllowAmbiguousSingle,
       });
     try {
@@ -1589,6 +1885,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
       const previousAccepted = acceptedMarkerSecrets.join(",");
       const previousCompatibility = legacyCompatibilityEnabled;
       const previousAmbiguous = legacyAllowAmbiguousSingle;
+      const previousProvenance = legacyProvenanceProven;
+      storedSyncStateJson = changes[SYNC_STATE_KEY].newValue
+        ? JSON.stringify(changes[SYNC_STATE_KEY].newValue)
+        : null;
       const normalized = applySyncedRuntimeState(
         changes[SYNC_STATE_KEY].newValue
       );
@@ -1604,7 +1904,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         previousSecret !== markerSecret ||
         previousAccepted !== acceptedMarkerSecrets.join(",") ||
         previousCompatibility !== legacyCompatibilityEnabled ||
-        previousAmbiguous !== legacyAllowAmbiguousSingle
+        previousAmbiguous !== legacyAllowAmbiguousSingle ||
+        previousProvenance !== legacyProvenanceProven
       );
       if (runtimeStateChanged) await persistSyncedRuntimeState();
     }
@@ -1716,20 +2017,32 @@ async function prepareInterception() {
     runtimeState.pendingOperation?.type === "schemaMigration" ||
     runtimeState.migrationMode === "legacy"
   );
-  legacyCompatibilityEnabled = syncedLegacyCompatibility ?? (
-    typeof runtimeState.legacyCompatibilityEnabled === "boolean"
-      ? runtimeState.legacyCompatibilityEnabled
-      : schemaMigration && hadStoredSettings
+  legacyCompatibilityEnabled = legacyProvenanceProven || (
+    syncedLegacyCompatibility ?? (
+      typeof runtimeState.legacyCompatibilityEnabled === "boolean"
+        ? runtimeState.legacyCompatibilityEnabled
+        : schemaMigration && hadStoredSettings
+    )
   );
-  legacyAllowAmbiguousSingle = legacyCompatibilityEnabled && (
-    syncedLegacyAllowAmbiguousSingle ??
-    (typeof runtimeState.migrationAllowAmbiguousSingle === "boolean"
-      ? runtimeState.migrationAllowAmbiguousSingle
-      : true)
+  legacyAllowAmbiguousSingle = legacyProvenanceProven || (
+    legacyCompatibilityEnabled && (
+      syncedLegacyAllowAmbiguousSingle ??
+      (typeof runtimeState.migrationAllowAmbiguousSingle === "boolean"
+        ? runtimeState.migrationAllowAmbiguousSingle
+        : true)
+    )
   );
   // Persist ownership and migration provenance before rewriting anything so a
   // second device or interrupted first run reaches the same decision.
   await persistSyncedRuntimeState();
+
+  try {
+    installedRuleFingerprint = ruleFingerprint(
+      await chrome.declarativeNetRequest.getDynamicRules()
+    );
+  } catch {
+    installedRuleFingerprint = null;
+  }
 
   const includePublicV3 = (
     runtimeState.bookmarkFormatVersion === 3 ||
@@ -1753,6 +2066,7 @@ async function prepareInterception() {
     includePublicV3,
     includeDraftV4
   );
+  await syncKeepAlive(ownsNavigations);
   return {
     runtimeState,
     sessionReady: session?.[SESSION_READY_KEY] === true,
@@ -1773,6 +2087,19 @@ maintenanceTail = interceptionReadyPromise.then(async ({
     runtimeState.bookmarkState !== desiredState
   );
   await applyConfiguredState(mustReconcile);
+
+  // Released 2.3 residue can outlive its migration: a bookmark restored from
+  // backup, or synchronized while this profile had already committed the
+  // current format, is never re-examined by the short-circuit above. Prove
+  // provenance once per profile so that residue is repaired rather than left
+  // uninterceptable, which is what lets Chrome replace the source page.
+  if (runtimeState.legacyResidueChecked !== true) {
+    if (await ensureLegacyProvenanceChecked()) {
+      await applyConfiguredState(true);
+    }
+    await updateRuntimeState({legacyResidueChecked: true});
+  }
+
   await chrome.storage.session?.set({[SESSION_READY_KEY]: true});
 }).catch((error) => {
   console.error("[Bookmarks→NewTab] Startup reconciliation failed", error);

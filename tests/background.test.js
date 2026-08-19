@@ -119,7 +119,7 @@ function createHarness(options = {}) {
   const localData = clone({
     settings,
     runtimeState: {
-      bookmarkFormatVersion: 5,
+      bookmarkFormatVersion: 6,
       bookmarkState: settings.enabled ? "enabled" : "disabled",
     },
     ...options.localData,
@@ -148,6 +148,7 @@ function createHarness(options = {}) {
   const calls = {
     alarmClears: [],
     alarmCreates: [],
+    bookmarkSearches: [],
     bookmarkUpdateStarts: [],
     createdTabs: [],
     downloadCancels: [],
@@ -264,9 +265,20 @@ function createHarness(options = {}) {
       onCreated: events.bookmarkCreated,
       onImportBegan: events.importBegan,
       onImportEnded: events.importEnded,
-      search: async ({url}) => [...bookmarkMap.values()]
-        .filter((bookmark) => bookmark.url === url)
-        .map((bookmark) => ({...bookmark})),
+      search: async (query) => {
+        calls.bookmarkSearches.push(clone(query));
+        const text = typeof query === "string" ? query : query.query;
+        return [...bookmarkMap.values()]
+          .filter((bookmark) => (
+            query.url !== undefined
+              ? bookmark.url === query.url
+              : Boolean(text) && (
+                (bookmark.url || "").includes(text) ||
+                (bookmark.title || "").includes(text)
+              )
+          ))
+          .map((bookmark) => ({...bookmark}));
+      },
       update: async (id, changes) => {
         const bookmark = bookmarkMap.get(String(id));
         if (!bookmark) throw new Error("Bookmark not found");
@@ -606,7 +618,7 @@ async function testFreshPerBookmarkNoncesArePrivate() {
     })),
     localData: {
       runtimeState: {
-        bookmarkFormatVersion: 5,
+        bookmarkFormatVersion: 6,
         bookmarkState: "enabled",
       },
     },
@@ -799,7 +811,7 @@ async function testLegacyBackupLimitsAndFailuresDoNotBlockMigration() {
     );
     assert.equal(
       harness.localData.runtimeState.bookmarkFormatVersion,
-      5,
+      6,
       `${testCase.name} must not leave migration incomplete`
     );
   }
@@ -904,7 +916,7 @@ async function testPauseResumesFailedSchemaMigrationBeforeCommitting() {
     originals,
     "Pause must restore every released/current layer before clearing schema state"
   );
-  assert.equal(harness.localData.runtimeState.bookmarkFormatVersion, 5);
+  assert.equal(harness.localData.runtimeState.bookmarkFormatVersion, 6);
   assert.equal(harness.localData.runtimeState.pendingOperation, null);
   assert.deepEqual(harness.dynamicRules, []);
 }
@@ -915,7 +927,7 @@ async function testColdReenableReconcilesNewCleanBookmark() {
     bookmarks: [{id: "reenable", title: "reenable", url: original}],
     localData: {
       runtimeState: {
-        bookmarkFormatVersion: 5,
+        bookmarkFormatVersion: 6,
         bookmarkState: "enabled",
       },
     },
@@ -1022,7 +1034,7 @@ async function testLegacyCompatibilityProvenanceSyncsAcrossDevices() {
     bookmarks: [...firstDevice.bookmarkMap.values()].map(clone),
     localData: {
       runtimeState: {
-        bookmarkFormatVersion: 5,
+        bookmarkFormatVersion: 6,
         bookmarkState: "enabled",
         markerSecretApplied: syncedProvenance.markerSecret,
       },
@@ -1117,7 +1129,7 @@ async function testOrdinaryLegacyPrefixAroundManagedMarkerCleans() {
   const prefixed = legacyMarkedUrl(inner);
   const harness = createHarness({
     bookmarks: [{id: "prefix-mixed", title: "prefix", url: prefixed}],
-    sessionData: {sessionReadyV5: true},
+    sessionData: {sessionReadyV6: true},
     tabs: [{
       id: 119,
       active: true,
@@ -1149,13 +1161,14 @@ async function testOrdinaryLegacyPrefixAroundManagedMarkerCleans() {
   assert.equal(harness.bookmarkMap.get("prefix-mixed").url, original);
 }
 
-async function testExactLegacyWrapperAroundManagedMarkerCleans() {
+async function testExactLegacyWrapperIsAlwaysRecovered() {
   const original = "https://mail.google.com/mail/u/0/#inbox";
   const inner = markedUrl(original, "m");
   const wrapper = legacyMarkedUrl(inner);
+  // No session-ready flag: this is the first worker start of a browser
+  // session, which is when residue already sitting in the tree gets repaired.
   const harness = createHarness({
     bookmarks: [{id: "wrapper-mixed", title: "wrapper", url: wrapper}],
-    sessionData: {sessionReadyV5: true},
     tabs: [{
       id: 120,
       active: true,
@@ -1165,7 +1178,13 @@ async function testExactLegacyWrapperAroundManagedMarkerCleans() {
     }],
   });
   await harness.sendRuntimeMessage({type: "getSettings"});
-  assert.equal(harness.bookmarkMap.get("wrapper-mixed").url, wrapper);
+  const recovered = harness.bookmarkMap.get("wrapper-mixed").url;
+  assert.equal(
+    TARGET_URL_TOOLS.readMarker(recovered)?.originalUrl,
+    original,
+    "the retired wrapper stopped forwarding in 2.4, so it must be recovered " +
+    "to the real destination rather than preserved for a 2.3 peer"
+  );
   assert.equal(
     harness.dynamicRules.some((rule) => (
       rule.condition?.urlFilter?.includes("redirect.html?url=*") &&
@@ -1173,28 +1192,27 @@ async function testExactLegacyWrapperAroundManagedMarkerCleans() {
       rule.condition.requestDomains?.includes("sssstf0rest.github.io")
     )),
     true,
-    "the exact mixed-wrapper rule must survive after broad migration ends"
+    "the exact mixed-wrapper rule must survive so a peer's re-wrap is caught"
   );
 
-  const writesBeforePeerChange = harness.calls.bookmarkUpdateStarts.length;
+  // A synchronized 2.3 peer can wrap it again. Recovery must converge on the
+  // clean destination instead of alternating between the two shapes.
+  harness.bookmarkMap.get("wrapper-mixed").url = wrapper;
   await harness.events.bookmarkChanged.emit("wrapper-mixed", {url: wrapper});
   await harness.settle();
   assert.equal(
-    harness.bookmarkMap.get("wrapper-mixed").url,
-    wrapper,
-    "2.4 must not unwrap a wrapper that a synchronized 2.3 peer will re-add"
-  );
-  assert.equal(
-    harness.calls.bookmarkUpdateStarts.length,
-    writesBeforePeerChange,
-    "mixed-version wrapper handling must not create a sync write loop"
+    TARGET_URL_TOOLS.readMarker(
+      harness.bookmarkMap.get("wrapper-mixed").url
+    )?.originalUrl,
+    original,
+    "a re-added wrapper must be recovered again, not left unusable"
   );
 
   await harness.events.beforeNavigate.emit({
     frameId: 0,
     tabId: 120,
     timeStamp: 1200,
-    url: wrapper,
+    url: harness.bookmarkMap.get("wrapper-mixed").url,
   });
   await harness.settle();
   assert.deepEqual(destinationActions(harness, [original]), [{
@@ -1210,13 +1228,13 @@ async function testExactLegacyWrapperAroundManagedMarkerCleans() {
   assert.equal(harness.bookmarkMap.get("wrapper-mixed").url, original);
 }
 
-async function testPureLegacyWrapperArrivingAfterMigrationIsAuthenticated() {
+async function testPureLegacyWrapperArrivingAfterMigrationIsRecovered() {
   const original = "https://mail.google.com/mail/u/0/#late-sync";
   const current = markedUrl(original, "m");
   const legacyWrapper = legacyMarkedUrl(original);
   const harness = createHarness({
     bookmarks: [{id: "late-wrapper", title: "late wrapper", url: current}],
-    sessionData: {sessionReadyV5: true},
+    sessionData: {sessionReadyV6: true},
     tabs: [{
       id: 121,
       active: true,
@@ -1233,7 +1251,11 @@ async function testPureLegacyWrapperArrivingAfterMigrationIsAuthenticated() {
   const authenticatedWrapper = harness.bookmarkMap.get("late-wrapper").url;
   const wrapperMarker = TARGET_URL_TOOLS.readMarker(authenticatedWrapper);
   assert.equal(wrapperMarker?.mode, "m");
-  assert.equal(wrapperMarker?.originalUrl, legacyWrapper);
+  assert.equal(
+    wrapperMarker?.originalUrl,
+    original,
+    "a wrapper arriving after migration must be recovered to its destination"
+  );
 
   await harness.events.beforeNavigate.emit({
     frameId: 0,
@@ -1275,13 +1297,13 @@ async function testDraftV4MarkerMigratesToAuthenticatedFormat() {
   assert.equal(marker.owner, KNOWN_MARKER_SECRET);
   assert.equal(marker.originalUrl, original);
   assert.notEqual(migrated, draft);
-  assert.equal(harness.localData.runtimeState.bookmarkFormatVersion, 5);
+  assert.equal(harness.localData.runtimeState.bookmarkFormatVersion, 6);
 }
 
 async function testNewBookmarkHandlingStartsWithoutTimer() {
   const original = "https://example.com/created-immediately";
   const harness = createHarness({
-    sessionData: {sessionReadyV5: true},
+    sessionData: {sessionReadyV6: true},
   });
   await harness.sendRuntimeMessage({type: "getSettings"});
   const updatesBefore = harness.calls.bookmarkUpdateStarts.length;
@@ -1312,7 +1334,7 @@ async function testChangedBookmarkUsesFreshChromeValue() {
   const stalePayload = "https://example.com/change-stale?revision=1";
   const harness = createHarness({
     bookmarks: [{id: "changed-fresh", title: "changed", url: markedUrl(initial)}],
-    sessionData: {sessionReadyV5: true},
+    sessionData: {sessionReadyV6: true},
   });
   await harness.sendRuntimeMessage({type: "getSettings"});
 
@@ -1344,7 +1366,7 @@ async function testSecretRotationAcceptsAndRewritesPreviousOwner() {
     bookmarks: [{id: "rotated", title: "rotated", url: previousMarked}],
     localData: {
       runtimeState: {
-        bookmarkFormatVersion: 5,
+        bookmarkFormatVersion: 6,
         bookmarkState: "enabled",
         markerSecretApplied: PREVIOUS_MARKER_SECRET,
       },
@@ -2289,6 +2311,220 @@ async function testCancellationUsesTypedNoContentResponse() {
   assert.deepEqual(clone(rule.condition.resourceTypes), ["main_frame"]);
 }
 
+// ─── 2.5 regressions ───────────────────────────────────────────────────────
+
+async function testQuietRestartDoesNoRedundantWork() {
+  const original = "https://github.com/explore";
+  const first = createHarness({
+    bookmarks: [{id: "b", title: "b", url: markedUrl(original)}],
+  });
+  await first.settle(120);
+
+  // Dynamic rules and synchronized ownership both outlive the worker, so a
+  // restart that agrees with them must not spend a sync write or a ruleset
+  // rewrite: both sit between the click and the tab Chrome is waiting for.
+  const restarted = createHarness({
+    bookmarks: [...first.bookmarkMap.values()].map(clone),
+    dynamicRules: clone(first.dynamicRules),
+    localData: clone(first.localData),
+    sessionData: {sessionReadyV6: true},
+    settings: clone(first.syncData.settings),
+    syncData: clone(first.syncData),
+  });
+  await restarted.settle(120);
+
+  assert.deepEqual(
+    restarted.calls.storageSets.filter((call) => call.areaName === "sync"),
+    [],
+    "a restart that agrees with synchronized state must not write to sync"
+  );
+  assert.deepEqual(
+    restarted.calls.dynamicRuleUpdates,
+    [],
+    "a restart must not reinstall dynamic rules that are already installed"
+  );
+  assert.deepEqual(restarted.calls.bookmarkUpdateStarts, []);
+}
+
+async function testModifierClickReusesTheTabChromeOpened() {
+  const original = "https://outlook.cloud.microsoft/mail/";
+  const marked = markedUrl(original);
+  const harness = createHarness({
+    bookmarks: [{id: "o", title: "outlook", url: marked}],
+    tabs: [{
+      id: 900,
+      active: true,
+      index: 0,
+      url: "https://open.spotify.com/collection",
+      windowId: 5,
+    }],
+  });
+  await harness.settle();
+
+  // Ctrl/Command and middle clicks make Chrome open the tab itself. Chrome can
+  // report that tab before it has populated any URL field, and tabs.onCreated
+  // can arrive after webNavigation, so the extension must recognize a tab with
+  // nothing committed as the tab to use instead of adding a second one.
+  harness.tabMap.set(950, {id: 950, active: false, index: 1, windowId: 5});
+  await harness.events.beforeNavigate.emit({
+    frameId: 0,
+    tabId: 950,
+    timeStamp: 9500,
+    url: marked,
+  });
+  await harness.settle(60);
+
+  assert.deepEqual(destinationActions(harness, [original]), [{
+    id: 950,
+    kind: "update",
+    url: original,
+  }], "a modifier click must produce exactly one tab, the one Chrome opened");
+  assert.deepEqual(harness.calls.createdTabs, []);
+}
+
+async function testCanonicalizationMismatchNeverTakesTheSourceTab() {
+  const original = "https://x.com/home";
+  // Chrome canonicalizes what it stores and what it reports; a bookmark and
+  // its navigation can differ as strings while naming the same page. Treating
+  // that as "not a bookmark" used to replace the page the user was reading.
+  const stored = markedUrl("https://x.com:443/home");
+  const reported = markedUrl(original);
+  const harness = createHarness({
+    bookmarks: [{id: "x", title: "x", url: stored}],
+    tabs: [{
+      id: 901,
+      active: true,
+      index: 0,
+      url: "https://open.spotify.com/collection",
+      windowId: 6,
+    }],
+  });
+  await harness.settle();
+
+  await harness.events.beforeNavigate.emit({
+    frameId: 0,
+    tabId: 901,
+    timeStamp: 9010,
+    url: reported,
+  });
+  await harness.settle(60);
+
+  assert.deepEqual(
+    harness.calls.updatedTabs.filter((update) => update.id === 901),
+    [],
+    "the loaded source document must survive a verification mismatch"
+  );
+  assert.equal(harness.calls.createdTabs.length, 1);
+  assert.equal(harness.calls.createdTabs[0].url, original);
+}
+
+async function testReleasedResidueIsRepairedOnAProfileAlreadyMigrated() {
+  const xOriginal = "https://x.com/home";
+  const outlookOriginal = "https://outlook.cloud.microsoft/mail/";
+  const residue = `https://newtab@x.com/home`;
+  const wrapper =
+    "https://newtab@sssstf0rest.github.io/Open-Bookmarks-in-New-Tab/" +
+    `redirect.html?url=${encodeURIComponent(outlookOriginal)}`;
+
+  // The shape the user hit: a profile whose format version is already current,
+  // holding bookmarks the migration never touched. Nothing intercepted them,
+  // so clicking one let Chrome replace the source page with the destination,
+  // and the wrapper opened a recovery page that no longer forwards.
+  const harness = createHarness({
+    bookmarks: [
+      {id: "x", title: "x", url: residue},
+      {id: "outlook", title: "outlook", url: wrapper},
+    ],
+    localData: {
+      runtimeState: {
+        bookmarkFormatVersion: 6,
+        bookmarkState: "enabled",
+      },
+    },
+    sessionData: {sessionReadyV6: true},
+    tabs: [{
+      id: 902,
+      active: true,
+      index: 0,
+      url: "https://open.spotify.com/collection",
+      windowId: 7,
+    }],
+  });
+  await waitUntil(
+    () => [
+      [harness.bookmarkMap.get("x").url, xOriginal],
+      [harness.bookmarkMap.get("outlook").url, outlookOriginal],
+    ].every(([stored, expected]) => (
+      TARGET_URL_TOOLS.readMarker(stored)?.originalUrl === expected
+    )),
+    "released 2.3 residue was not repaired"
+  );
+  assert.equal(harness.syncData.syncStateV4.legacyProvenanceProven, true);
+
+  for (const [id, expected] of [["x", xOriginal], ["outlook", outlookOriginal]]) {
+    const before = harness.calls.createdTabs.length;
+    await harness.events.beforeNavigate.emit({
+      frameId: 0,
+      tabId: 902,
+      timeStamp: 9020 + before,
+      url: harness.bookmarkMap.get(id).url,
+    });
+    await harness.settle(60);
+    assert.deepEqual(
+      harness.calls.createdTabs.slice(before).map((tab) => tab.url),
+      [expected]
+    );
+  }
+  assert.deepEqual(
+    harness.calls.updatedTabs.filter((update) => update.id === 902),
+    [],
+    "repaired bookmarks must never navigate the source document"
+  );
+}
+
+async function testRetiredWrapperNeverBecomesTheDestination() {
+  const original = "https://outlook.cloud.microsoft/mail/";
+  const wrapper =
+    "https://sssstf0rest.github.io/Open-Bookmarks-in-New-Tab/" +
+    `redirect.html?url=${encodeURIComponent(original)}`;
+  // A preserve capability stops the generic unwrap, so this shape can still
+  // reach the navigation path. The wrapper page stopped forwarding in 2.4,
+  // so opening it would show a recovery page instead of the bookmark.
+  const stored = markedUrl(wrapper, "p");
+  const harness = createHarness({
+    bookmarks: [{id: "w", title: "outlook", url: stored}],
+    localData: {
+      runtimeState: {
+        bookmarkFormatVersion: 6,
+        bookmarkState: "enabled",
+        legacyResidueChecked: true,
+      },
+    },
+    sessionData: {sessionReadyV6: true},
+    tabs: [{
+      id: 903,
+      active: true,
+      index: 0,
+      url: "https://source.example/page",
+      windowId: 8,
+    }],
+  });
+  await harness.settle();
+
+  await harness.events.beforeNavigate.emit({
+    frameId: 0,
+    tabId: 903,
+    timeStamp: 9030,
+    url: stored,
+  });
+  await harness.settle(60);
+  assert.deepEqual(
+    harness.calls.createdTabs.map((tab) => tab.url),
+    [original],
+    "the encoded destination must open, never the retired wrapper page"
+  );
+}
+
 async function testPackageContainsNoDownloadMechanism() {
   const manifest = JSON.parse(fs.readFileSync(
     path.join(ROOT, "manifest.json"),
@@ -2297,9 +2533,8 @@ async function testPackageContainsNoDownloadMechanism() {
   const harness = createHarness();
   await harness.settle();
 
-  assert.equal(manifest.version, "2.4.0");
+  assert.equal(manifest.version, "2.5.0");
   assert.equal(manifest.permissions.includes("downloads"), false);
-  assert.equal(manifest.permissions.includes("alarms"), false);
   assert.equal("declarative_net_request" in manifest, false);
   assert.equal(fs.existsSync(path.join(ROOT, "empty.zip")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "rules.json")), false);
@@ -2308,11 +2543,26 @@ async function testPackageContainsNoDownloadMechanism() {
     false
   );
   assert.equal(harness.events.downloadCreated.listeners.length, 0);
-  assert.equal(harness.events.alarm.listeners.length, 0);
-  assert.deepEqual(harness.calls.alarmCreates, []);
   assert.deepEqual(harness.calls.downloadUiOptions, []);
   assert.equal(backgroundSource.includes("chrome.downloads"), false);
-  assert.equal(backgroundSource.includes("chrome.alarms"), false);
+
+  // Alarms came back in 2.5, but only to keep the worker resident: a shut down
+  // worker cannot answer the cancellation, which leaves the source page in a
+  // pending navigation. Nothing else may be scheduled through them.
+  assert.equal(manifest.permissions.includes("alarms"), true);
+  assert.deepEqual(harness.calls.alarmCreates, [{
+    name: "keepAlive",
+    alarmInfo: {periodInMinutes: 0.5},
+  }]);
+  assert.equal(harness.events.alarm.listeners.length, 1);
+  const alarmWork = harness.calls.bookmarkUpdateStarts.length;
+  await harness.events.alarm.emit({name: "keepAlive"});
+  await harness.settle();
+  assert.equal(
+    harness.calls.bookmarkUpdateStarts.length,
+    alarmWork,
+    "the keep-alive alarm must do no work when it fires"
+  );
   assert.match(
     JSON.stringify(manifest.web_accessible_resources),
     /cancel\.html/
@@ -2340,8 +2590,8 @@ const tests = [
   ["legacy provenance syncs across devices", testLegacyCompatibilityProvenanceSyncsAcrossDevices],
   ["post-migration Basic Auth bookmarks round-trip", testPostMigrationBasicAuthBookmarkRoundTripsIntact],
   ["ordinary 2.3 prefixes around m markers clean", testOrdinaryLegacyPrefixAroundManagedMarkerCleans],
-  ["exact 2.3 wrappers around owned markers clean", testExactLegacyWrapperAroundManagedMarkerCleans],
-  ["late pure 2.3 wrappers are authenticated", testPureLegacyWrapperArrivingAfterMigrationIsAuthenticated],
+  ["exact 2.3 wrappers are recovered, never preserved", testExactLegacyWrapperIsAlwaysRecovered],
+  ["late pure 2.3 wrappers are recovered", testPureLegacyWrapperArrivingAfterMigrationIsRecovered],
   ["draft v4 markers migrate to authenticated format", testDraftV4MarkerMigratesToAuthenticatedFormat],
   ["new bookmark handling starts without a timer", testNewBookmarkHandlingStartsWithoutTimer],
   ["changed bookmarks use the fresh Chrome value", testChangedBookmarkUsesFreshChromeValue],
@@ -2366,6 +2616,11 @@ const tests = [
   ["accepted owners without rules cannot duplicate", testAcceptedOwnerWithoutRuleCannotDuplicateOnInitFailure],
   ["committed navigation never destroys source tabs", testCommittedNavigationNeverDestroysSourceTab],
   ["cancellation uses a typed 204 response", testCancellationUsesTypedNoContentResponse],
+  ["quiet restarts do no redundant work", testQuietRestartDoesNoRedundantWork],
+  ["modifier clicks reuse the tab Chrome opened", testModifierClickReusesTheTabChromeOpened],
+  ["canonicalization mismatch never takes the source tab", testCanonicalizationMismatchNeverTakesTheSourceTab],
+  ["released residue is repaired after migration", testReleasedResidueIsRepairedOnAProfileAlreadyMigrated],
+  ["the retired wrapper never becomes a destination", testRetiredWrapperNeverBecomesTheDestination],
   ["package contains no download mechanism", testPackageContainsNoDownloadMechanism],
 ];
 

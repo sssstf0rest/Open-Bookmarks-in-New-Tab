@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Open Bookmarks in New Tab",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "minimum_chrome_version": "151",
   "description": "Opens HTTP(S) bookmarks in a new tab while preserving the current page.",
   "incognito": "not_allowed",
   "permissions": [
+    "alarms",
     "bookmarks",
     "tabs",
     "storage",
