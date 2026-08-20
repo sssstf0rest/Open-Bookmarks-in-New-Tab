@@ -49,6 +49,9 @@ const NEWTAB_PREFIX = "newtab@";
 /** Path to the dummy file that declarativeNetRequest redirects to */
 const EMPTY_ZIP_FILENAME = "empty.zip";
 
+/** ID of the static declarativeNetRequest ruleset declared in manifest.json */
+const RULESET_ID = "newtab_redirect";
+
 /** Interval (minutes) for the keep-alive alarm */
 const KEEPALIVE_INTERVAL_MIN = 0.5;
 
@@ -202,6 +205,58 @@ function isRedirectPageUrl(url) {
     "$1"
   );
   return stripped.startsWith(REDIRECT_PAGE_BASE);
+}
+
+/**
+ * Strips every layer of the newtab@ marker, including the redirect-page wrapper.
+ *
+ * removePrefix() peels one layer. Older builds could double-prefix a bookmark
+ * (https://newtab@newtab@example.com), so migration peels until stable rather
+ * than leaving a half-marked URL behind. The iteration cap is a safety stop —
+ * removePrefix always shrinks the string, so it cannot legitimately loop.
+ *
+ * @param {string} url
+ * @returns {string}  The URL with no marker left on it.
+ */
+function fullyUnprefix(url) {
+  let clean = url;
+  for (let i = 0; i < 5 && hasPrefix(clean); i++) {
+    const next = removePrefix(clean);
+    if (next === clean) break;
+    clean = next;
+  }
+  return clean;
+}
+
+/**
+ * Brings a bookmark URL up to the CURRENT marking scheme.
+ *
+ * addPrefix() alone cannot do this: it returns early on anything that already
+ * carries the marker, so a bookmark stored under an older scheme keeps that
+ * scheme forever. In particular, adding a domain to CREDENTIAL_STRIPPED_DOMAINS
+ * never converted existing bookmarks — a bookmark saved as
+ * https://newtab@gmail.com/ stayed that way even after gmail.com joined the
+ * list, which is why the same bookmark misbehaved for some users and not others.
+ *
+ * Unmarking and re-marking converges in both directions: it wraps a bookmark
+ * whose domain was ADDED to the list, and unwraps one whose domain was REMOVED.
+ * It is idempotent, so it is safe to run on every enable.
+ *
+ * @param {string} url  The stored bookmark URL, marked or not.
+ * @returns {string}    The URL as the current scheme would write it.
+ */
+function migrateUrl(url) {
+  if (!canPrefixUrl(url)) return url;
+
+  const unwrapped = fullyUnprefix(url);
+
+  // Guard: a proxy-wrapped bookmark whose ?url= payload cannot be recovered
+  // (hand-edited, truncated) would be destroyed by a round trip — unwrapping
+  // yields the redirect page itself rather than the real destination. Leave
+  // those exactly as they are. Same for a payload that is not http(s).
+  if (isRedirectPageUrl(unwrapped) || !canPrefixUrl(unwrapped)) return url;
+
+  return addPrefix(unwrapped);
 }
 
 /**
@@ -388,13 +443,18 @@ async function walkNodes(nodes, transformFn) {
 }
 
 /**
- * Adds the newtab@ prefix to ALL bookmarks.
- * Called when the extension is installed or enabled.
+ * Marks ALL bookmarks with the CURRENT scheme.
+ * Called when the extension is installed, updated, or enabled.
+ *
+ * Uses migrateUrl rather than addPrefix so an already-marked bookmark is
+ * re-marked under today's CREDENTIAL_STRIPPED_DOMAINS instead of being skipped.
+ * walkNodes only writes when the URL actually changes, so this costs no extra
+ * bookmark writes on a run where nothing needs migrating.
  */
 async function prefixAllBookmarks() {
-  console.log("[Bookmarks→NewTab] Adding prefix to all bookmarks…");
-  await walkAndTransformBookmarks(addPrefix);
-  console.log("[Bookmarks→NewTab] Prefix added to all bookmarks.");
+  console.log("[Bookmarks→NewTab] Marking all bookmarks with current scheme…");
+  await walkAndTransformBookmarks(migrateUrl);
+  console.log("[Bookmarks→NewTab] All bookmarks marked.");
 }
 
 /**
@@ -403,7 +463,9 @@ async function prefixAllBookmarks() {
  */
 async function unprefixAllBookmarks() {
   console.log("[Bookmarks→NewTab] Removing prefix from all bookmarks…");
-  await walkAndTransformBookmarks(removePrefix);
+  // fullyUnprefix, not removePrefix: a bookmark an older build double-marked
+  // would otherwise be left half-marked and still broken after pausing.
+  await walkAndTransformBookmarks(fullyUnprefix);
   console.log("[Bookmarks→NewTab] Prefix removed from all bookmarks.");
 }
 
@@ -782,7 +844,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function enableExtension() {
   // Enable the redirect rule
   await chrome.declarativeNetRequest.updateEnabledRulesets({
-    enableRulesetIds: ["newtab_redirect"],
+    enableRulesetIds: [RULESET_ID],
   });
 
   // Add prefix to all bookmarks
@@ -802,7 +864,7 @@ async function disableExtension() {
 
   // Disable the redirect rule
   await chrome.declarativeNetRequest.updateEnabledRulesets({
-    disableRulesetIds: ["newtab_redirect"],
+    disableRulesetIds: [RULESET_ID],
   });
 
   // Stop the keep-alive alarm
@@ -900,16 +962,66 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // times due to Chrome's MV3 lifecycle). We reload settings and ensure the
 // keep-alive alarm is running.
 
+/**
+ * Brings the declarativeNetRequest ruleset in line with the stored setting.
+ *
+ * The static ruleset's enabled state is persisted PER PROFILE by Chrome, but it
+ * was only ever written on an enable/disable transition — never checked at
+ * startup. Bookmark markers, by contrast, travel between machines through
+ * Chrome bookmark sync, because the marker lives in the bookmark URL itself.
+ *
+ * So a profile could end up holding fully marked, synced bookmarks while its
+ * ruleset sat disabled. The rule then never matches, no download is ever
+ * created, and the source tab visibly navigates and gets restored instead —
+ * the extension appears to "work" while behaving completely differently from
+ * the machine the bookmarks came from.
+ *
+ * Reconciling on every worker start makes the two states converge on their own.
+ */
+async function reconcileRuleset() {
+  try {
+    const enabledRulesets =
+      await chrome.declarativeNetRequest.getEnabledRulesets();
+    const ruleIsOn = enabledRulesets.includes(RULESET_ID);
+
+    if (settings.enabled && !ruleIsOn) {
+      console.warn(
+        "[Bookmarks→NewTab] Ruleset was disabled but settings say enabled — re-enabling."
+      );
+      await chrome.declarativeNetRequest.updateEnabledRulesets({
+        enableRulesetIds: [RULESET_ID],
+      });
+    } else if (!settings.enabled && ruleIsOn) {
+      console.warn(
+        "[Bookmarks→NewTab] Ruleset was enabled but settings say paused — disabling."
+      );
+      await chrome.declarativeNetRequest.updateEnabledRulesets({
+        disableRulesetIds: [RULESET_ID],
+      });
+    }
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not reconcile ruleset:", err);
+  }
+}
+
 async function init() {
   await loadSettings();
 
+  // Make sure the redirect rule matches the stored enabled state. Cheap (one
+  // read, a write only on drift) and it runs before any bookmark click can be
+  // handled, so it cannot fight the listeners.
+  await reconcileRuleset();
+
   // Hide the download UI for our dummy empty.zip downloads (Chrome 117+).
-  // Even if the downloads.onCreated cancel is slightly delayed, the user
-  // won't see a download bubble flash.
+  // NOTE: this call needs the "downloads.ui" permission, which the manifest
+  // deliberately does not declare — that permission suppresses download UI
+  // profile-wide for every download from any source. So this always rejects
+  // and is swallowed below. Kept only to document the intent; do not "fix" it
+  // by adding the permission.
   try {
     await chrome.downloads.setUiOptions?.({ enabled: false });
   } catch (err) {
-    // Not supported in older Chrome — non-critical
+    // Not supported / not permitted — non-critical
   }
 
   if (settings.enabled) {
