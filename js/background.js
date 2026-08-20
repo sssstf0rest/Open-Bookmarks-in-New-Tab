@@ -32,7 +32,8 @@
  *
  * Permissions:
  *   - bookmarks             → read & rewrite bookmark URLs
- *   - tabs                  → open new tabs, query active tab
+ *   - tabs                  → open new tabs, read the navigating tab
+ *                             (never the active tab — see openInNewTab)
  *   - storage               → persist user settings
  *   - downloads             → intercept & cancel dummy downloads
  *   - declarativeNetRequest → redirect newtab@ URLs to empty.zip
@@ -99,7 +100,7 @@ let settings = { ...DEFAULT_SETTINGS };
  * onBeforeNavigate listener. This prevents the downloads.onCreated listener
  * from opening a duplicate tab for the same bookmark click.
  *
- * Entry shape: { cleanUrl: string, reused: boolean }
+ * Entry shape: { cleanUrl: string, reused: boolean, seq: number }
  *   - cleanUrl: the destination URL (without newtab@ prefix)
  *   - reused:   true if openInNewTab reused the source tab itself
  *               (i.e. source tab was a new-tab page). When true,
@@ -107,8 +108,10 @@ let settings = { ...DEFAULT_SETTINGS };
  *               is intentional and the final URL may differ from
  *               cleanUrl due to server-side redirects (e.g. ChatGPT
  *               redirects chat.openai.com → chatgpt.com).
+ *   - seq:      handoff id, so an expiry timer only deletes its own entry
+ *               and not a newer click's on the same tab.
  */
-const handledTabs = new Map(); // tabId → { cleanUrl, reused }
+const handledTabs = new Map(); // tabId → { cleanUrl, reused, seq }
 
 /**
  * Destination URLs that onBeforeNavigate has already opened, used to stop the
@@ -122,12 +125,43 @@ const handledTabs = new Map(); // tabId → { cleanUrl, reused }
  * Written SYNCHRONOUSLY in onBeforeNavigate, before any await, so the entry is
  * already present by the time the download event arrives.
  *
- * Entry shape: cleanUrl → timestamp (ms)
+ * Entry shape: cleanUrl → seq (the handoff id, so an expiry timer only deletes
+ * its own entry and not a newer click's on the same URL)
  */
-const recentlyOpenedUrls = new Map(); // cleanUrl → timestamp
+const recentlyOpenedUrls = new Map(); // cleanUrl → seq
 
 /** How long a recentlyOpenedUrls / handledTabs entry stays valid (ms) */
 const HANDOFF_TTL_MS = 10000;
+
+/**
+ * Monotonic id stamped on every handoff entry.
+ *
+ * The expiry timers must only delete the entry they were scheduled for. Keyed
+ * on tabId or cleanUrl alone, click #1's timer would delete click #2's entry
+ * when the same tab (or the same URL) is clicked again inside the TTL, leaving
+ * onCommitted with no record and sending it down the full-fallback path.
+ */
+let handoffSeq = 0;
+
+/**
+ * Resolves once init() has loaded the real settings from storage.
+ *
+ * `settings` starts as DEFAULT_SETTINGS (enabled: true), and init() replaces it
+ * asynchronously. Any listener that acts on settings.enabled before that read
+ * lands is working from a guess — and on a cold service worker start, that is
+ * exactly when listeners fire. The visible bug: pause the extension, let the
+ * worker sleep, then add a bookmark. The worker wakes, sees the default
+ * enabled: true, and marks the new bookmark even though the user paused.
+ *
+ * Only the listeners that MUTATE bookmarks or toggle the extension await this.
+ * The navigation and download listeners deliberately do not: their real guard
+ * is hasPrefix(), which is already false when the extension is paused, and
+ * awaiting here would break onBeforeNavigate's synchronous handoff write.
+ */
+let markSettingsReady;
+const settingsReady = new Promise((resolve) => {
+  markSettingsReady = resolve;
+});
 
 // ─── Settings Helpers ────────────────────────────────────────────────────────
 
@@ -310,12 +344,16 @@ function removePrefix(url) {
     "$1"
   );
 
-  // If this is a redirect-page URL, extract the real URL from ?url= param
+  // If this is a redirect-page URL, extract the real URL from ?url= param.
+  // The payload is only trusted when it is http(s): this value is handed
+  // straight to chrome.tabs.create/update, and a bookmark hand-edited to carry
+  // a javascript: or data: payload must not be opened. Anything else falls
+  // through to the redirect page itself, which is inert.
   if (stripped.startsWith(REDIRECT_PAGE_BASE)) {
     try {
       const parsed = new URL(stripped);
       const realUrl = parsed.searchParams.get("url");
-      if (realUrl) return realUrl;
+      if (realUrl && canPrefixUrl(realUrl)) return realUrl;
     } catch {
       // Fall through to return the stripped URL
     }
@@ -477,6 +515,7 @@ async function unprefixAllBookmarks() {
  * When a new bookmark is created, add the prefix if the extension is enabled.
  */
 chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
+  await settingsReady; // never mark a bookmark based on a guessed enabled state
   if (!settings.enabled) return;
   if (!bookmark.url) return; // It's a folder
 
@@ -495,6 +534,7 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
  * This handles the case where the user edits a bookmark URL manually.
  */
 chrome.bookmarks.onChanged.addListener(async (id, changeInfo) => {
+  await settingsReady; // never mark a bookmark based on a guessed enabled state
   if (!settings.enabled) return;
   if (!changeInfo.url) return;
 
@@ -565,9 +605,15 @@ async function openInNewTab(cleanUrl, sourceTabId) {
       active: openedInBackground ? false : settings.focusNewTab,
     };
 
-    // Determine tab placement
-    if (settings.position === "right" && sourceTab) {
-      createOptions.index = sourceTab.index + 1;
+    // Determine tab placement. Pin the window explicitly: without windowId,
+    // Chrome puts the tab in the last-focused window, which is not necessarily
+    // the window the bookmark was clicked in — and then `index` below would be
+    // measured against a different window's tab strip.
+    if (sourceTab) {
+      createOptions.windowId = sourceTab.windowId;
+      if (settings.position === "right") {
+        createOptions.index = sourceTab.index + 1;
+      }
     }
     // "end" is the default — Chrome appends to the end of the tab bar
 
@@ -594,19 +640,31 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   const cleanUrl = removePrefix(details.url);
   if (!cleanUrl) return;
 
+  const seq = ++handoffSeq;
+
   // Mark this tab as handled IMMEDIATELY (before any await) so the
   // download listener and onCommitted both see the entry. We start with
   // reused=false; openInNewTab may upgrade it to true below.
-  handledTabs.set(details.tabId, { cleanUrl, reused: false });
+  handledTabs.set(details.tabId, { cleanUrl, reused: false, seq });
 
   // Record the destination URL too — this is what the downloads listener
   // correlates on, since DownloadItem carries no tab identity. Must also be
   // synchronous: the download event can arrive while we are still awaiting.
-  recentlyOpenedUrls.set(cleanUrl, Date.now());
+  recentlyOpenedUrls.set(cleanUrl, seq);
 
-  // Clean up both entries after the handoff window to avoid memory leaks
-  setTimeout(() => handledTabs.delete(details.tabId), HANDOFF_TTL_MS);
-  setTimeout(() => recentlyOpenedUrls.delete(cleanUrl), HANDOFF_TTL_MS);
+  // Clean up both entries after the handoff window to avoid memory leaks.
+  // Each timer deletes ONLY the entry it was scheduled for — a later click on
+  // the same tab or the same URL installs a newer seq, and this timer must
+  // leave that one alone.
+  setTimeout(() => {
+    const entry = handledTabs.get(details.tabId);
+    if (entry && entry.seq === seq) handledTabs.delete(details.tabId);
+  }, HANDOFF_TTL_MS);
+  setTimeout(() => {
+    if (recentlyOpenedUrls.get(cleanUrl) === seq) {
+      recentlyOpenedUrls.delete(cleanUrl);
+    }
+  }, HANDOFF_TTL_MS);
 
   // Open the real URL in a new tab (or reuse the source tab if it's empty)
   const { reused } = await openInNewTab(cleanUrl, details.tabId);
@@ -635,7 +693,15 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   const urlIsZip          = (downloadItem.url === emptyZipUrl);
   const referrerHasPrefix = hasPrefix(downloadItem.referrer || "");
 
-  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip || referrerHasPrefix;
+  // A referrer carrying the marker is deliberately NOT enough on its own to
+  // claim a download. This listener cancels and erases whatever it claims, so
+  // a false positive silently destroys a download the user actually wanted —
+  // e.g. any real file started from a page that was reached through the proxy
+  // and still has newtab@ in its referrer. Every download we genuinely create
+  // is identified by its own URL: DownloadItem.url is the pre-redirect marker
+  // URL, and finalUrl is our bundled empty.zip. The referrer is only used
+  // below as a last resort for recovering the destination.
+  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip;
   if (!isOurDownload) return;
 
   // ── Recover the original bookmark URL ──────────────────────────────
@@ -778,6 +844,26 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   const cleanUrl = removePrefix(details.url);
   const tabId = details.tabId;
 
+  // ...unless a tab for this destination was already opened moments ago.
+  // handledTabs is keyed by tabId and lives only in memory, so it is empty
+  // after a service-worker restart even though onBeforeNavigate did run and
+  // did open the tab. recentlyOpenedUrls is keyed by URL and survives that
+  // same restart no better — but when it IS present it is proof a tab exists,
+  // and creating a second one here is the third duplicate-tab source.
+  // Restore this tab instead of adding to the pile.
+  if (recentlyOpenedUrls.has(cleanUrl)) {
+    try {
+      await chrome.tabs.goBack(tabId);
+    } catch (err) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch (removeErr) {
+        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
+      }
+    }
+    return;
+  }
+
   try {
     const tab = await chrome.tabs.get(tabId);
 
@@ -910,8 +996,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // ─── Listen for storage changes (sync across popup & background) ─────────────
-chrome.storage.onChanged.addListener((changes, area) => {
+chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area === "sync" && changes.settings) {
+    // Wait for the stored settings before comparing. On a cold worker the
+    // in-memory value is still DEFAULT_SETTINGS (enabled: true), so a synced
+    // enabled:true would look like "no transition" and the enable would be
+    // skipped — leaving the ruleset off and the bookmarks unmarked.
+    await settingsReady;
+
     const previousEnabled = settings.enabled;
     settings = { ...DEFAULT_SETTINGS, ...changes.settings.newValue };
 
@@ -1005,7 +1097,17 @@ async function reconcileRuleset() {
 }
 
 async function init() {
-  await loadSettings();
+  // finally, not a plain call: if the settings read ever throws, the gate must
+  // still open. A permanently-pending settingsReady would hang every bookmark
+  // listener for the life of the worker.
+  try {
+    await loadSettings();
+  } finally {
+    // Release the bookmark-mutating listeners now that settings are real.
+    // Done before the awaits below so a queued bookmark event is not held up
+    // by ruleset reconciliation.
+    markSettingsReady();
+  }
 
   // Make sure the redirect rule matches the stored enabled state. Cheap (one
   // read, a write only on drift) and it runs before any bookmark click can be
