@@ -313,16 +313,21 @@ function isNewTabPage(url) {
  * Returns true if this tab is safe to navigate directly to the bookmark
  * instead of opening a new one.
  *
- * This is deliberately stricter than isNewTabPage(tab.url). Tab.url is the last
- * COMMITTED URL and is the empty string for any tab that has not committed yet,
- * so an empty url is not evidence of a new-tab page — it just means "unknown".
- * Treating unknown as reusable is how an in-flight tab gets hijacked.
+ * Reuse requires a tab that has COMMITTED a new-tab page. Two rules follow, and
+ * both matter:
  *
- * A tab is reusable when:
- *   - it has committed a new-tab page, or
- *   - it has committed nothing and is loading a new-tab page, our own newtab@
- *     marker (i.e. it IS the tab this bookmark click is navigating), or
- *     nothing at all.
+ * 1. Tab.url is the last COMMITTED URL and is "" for a tab that has not
+ *    committed anything. An empty url therefore means "unknown", not "blank" —
+ *    treating it as reusable is how an in-flight tab gets hijacked.
+ *
+ * 2. More importantly, a tab with nothing committed is one Chrome created FOR
+ *    this very navigation — Cmd/Ctrl+click, middle-click, or "Open all
+ *    bookmarks". That tab is doomed: its only navigation is the newtab@ marker,
+ *    which declarativeNetRequest turns into a download, and Chrome discards a
+ *    tab whose sole navigation became a download. That teardown reliably beats
+ *    our two IPC round-trips (tabs.get then tabs.update), so navigating it is
+ *    handing the user a tab that is about to vanish. Open our own tab instead
+ *    and let Chrome discard the doomed one.
  *
  * @param {chrome.tabs.Tab|null|undefined} tab
  * @returns {boolean}
@@ -330,12 +335,11 @@ function isNewTabPage(url) {
 function isReusableBlankTab(tab) {
   if (!tab) return false;
 
-  // Committed to something — judge on the real URL.
-  if (tab.url) return isNewTabPage(tab.url);
+  // Nothing committed → a tab Chrome opened for this navigation. Never reuse.
+  if (!tab.url) return false;
 
-  // Nothing committed. Decide on what it is loading, not on the empty url.
-  if (!tab.pendingUrl) return true; // brand-new blank tab
-  return isNewTabPage(tab.pendingUrl) || hasPrefix(tab.pendingUrl);
+  // Committed to something — judge on the real URL.
+  return isNewTabPage(tab.url);
 }
 
 // ─── Bookmark Rewriting ──────────────────────────────────────────────────────
@@ -487,10 +491,16 @@ async function openInNewTab(cleanUrl, sourceTabId) {
       return { reused };
     }
 
-    // Normal case — open in a new tab
+    // Normal case — open in a new tab.
+    // If the tab this navigation belongs to was itself opened in the
+    // background (Cmd/Ctrl+click, middle-click, "Open all bookmarks"), keep the
+    // replacement in the background too — the user asked for a background tab
+    // and focusNewTab is about ordinary same-tab bookmark clicks.
+    const openedInBackground = sourceTab ? sourceTab.active === false : false;
+
     let createOptions = {
       url: cleanUrl,
-      active: settings.focusNewTab,
+      active: openedInBackground ? false : settings.focusNewTab,
     };
 
     // Determine tab placement
