@@ -72,8 +72,8 @@ const REDIRECT_PAGE_BASE =
  */
 const CREDENTIAL_STRIPPED_DOMAINS = [
   "mail.google.com",         // Gmail
-  "gmail.com",
-  "www.gmail.com",
+  "gmail.com",               // Gmail
+  "www.gmail.com",           // Gmail
   "outlook.cloud.microsoft", // Outlook (new domain)
   "outlook.live.com",        // Outlook (personal)
   "outlook.office.com",      // Outlook (work)
