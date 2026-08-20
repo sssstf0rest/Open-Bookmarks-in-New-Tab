@@ -32,13 +32,22 @@ Verifying changes means watching real bookmark clicks: check that exactly one de
 
 Three listeners race on every bookmark click; understanding their ordering is essential:
 
-1. **`webNavigation.onBeforeNavigate`** ([js/background.js:469](js/background.js:469)) — the **primary** path. Fires before the declarativeNetRequest redirect, so it opens the destination tab immediately rather than waiting for the download round-trip. It records `details.tabId` in `handledTabs` **synchronously before any `await`**, so the other two listeners can see the entry. Do not move that `set` below an await.
-2. **`downloads.onCreated`** ([js/background.js:504](js/background.js:504)) — safety net. The DNR rule ([rules.json](rules.json)) redirects `^https?://newtab@` main-frame requests to the bundled `empty.zip`, producing a dummy download that this listener cancels and erases. It also opens the tab as a fallback if `onBeforeNavigate` never fired.
-3. **`webNavigation.onCommitted`** ([js/background.js:576](js/background.js:576)) — restore path. Handles the two cases where the source tab actually navigated: the prefix survived to commit (Edge, timing), or Chrome stripped the prefix before DNR could match. Restores the tab with `tabs.goBack()`, falling back to `tabs.remove()`, then to `chrome://newtab`.
+1. **`webNavigation.onBeforeNavigate`** ([js/background.js:516](js/background.js:516)) — the **primary** path. Fires before the declarativeNetRequest redirect, so it opens the destination tab immediately rather than waiting for the download round-trip. It records `details.tabId` in `handledTabs` **synchronously before any `await`**, so the other two listeners can see the entry. Do not move that `set` below an await.
+2. **`downloads.onCreated`** ([js/background.js:557](js/background.js:557)) — safety net. The DNR rule ([rules.json](rules.json)) redirects `^https?://newtab@` main-frame requests to the bundled `empty.zip`, producing a dummy download that this listener cancels and erases. It also opens the tab as a fallback if `onBeforeNavigate` never fired. **It has no tab identity** (`DownloadItem` carries none), so it correlates on the destination URL via `recentlyOpenedUrls` and, when it does fall back, calls `openInNewTab` with no tab id so a new tab is created rather than an existing one guessed at.
+3. **`webNavigation.onCommitted`** ([js/background.js:639](js/background.js:639)) — restore path. Handles the two cases where the source tab actually navigated: the prefix survived to commit (Edge, timing), or Chrome stripped the prefix before DNR could match. Restores the tab with `tabs.goBack()`, falling back to `tabs.remove()`, then to `chrome://newtab`.
+
+### Two handoff maps — `handledTabs` and `recentlyOpenedUrls`
+
+The three listeners share state through two maps, both written **synchronously in `onBeforeNavigate` before any `await`** and both expiring after `HANDOFF_TTL_MS` (10s):
+
+- **`handledTabs`** (`Map<tabId, {cleanUrl, reused}>`) — read by `onCommitted`, which knows the tab id.
+- **`recentlyOpenedUrls`** (`Map<cleanUrl, timestamp>`) — read by `downloads.onCreated`, which does **not** know the tab id and never can. `DownloadItem` has no `tabId` field, so the URL is the only thing both listeners can see. The download listener extracts `cleanUrl` *before* `cancel`/`erase` so its dedup decision reflects state as of `onBeforeNavigate`, not several IPC hops later.
+
+Keying the download path on `tabId` is what produced duplicate tabs on every click; don't reintroduce it.
 
 ### `handledTabs` and the `reused` flag
 
-`handledTabs` (`Map<tabId, {cleanUrl, reused}>`, [js/background.js:108](js/background.js:108)) is the deduplication state, cleared after 10s. `reused: true` means `openInNewTab` navigated the **source** tab directly because it was an empty/new-tab page ([`isNewTabPage`](js/background.js:281)). When `reused` is set, `onCommitted` must **not** restore the tab — the commit is the intended destination, and its final URL may legitimately differ from `cleanUrl` after server-side redirects (`chat.openai.com` → `chatgpt.com`, `baidu.com` → `www.baidu.com`). Breaking this check makes destination tabs close themselves.
+`handledTabs` (`Map<tabId, {cleanUrl, reused}>`, [js/background.js:108](js/background.js:108)) is the deduplication state, cleared after 10s. `reused: true` means `openInNewTab` navigated the **source** tab directly because it was an empty/new-tab page ([`isReusableBlankTab`](js/background.js:330)). When `reused` is set, `onCommitted` must **not** restore the tab — the commit is the intended destination, and its final URL may legitimately differ from `cleanUrl` after server-side redirects (`chat.openai.com` → `chatgpt.com`, `baidu.com` → `www.baidu.com`). Breaking this check makes destination tabs close themselves.
 
 ## Credential-Stripped Domains
 
@@ -60,19 +69,20 @@ Stored in **`chrome.storage.sync`** under key `"settings"` (not `local` — the 
 - `focusNewTab` (bool)
 - `position` (`"end"` | `"right"`)
 
-The popup talks to the worker through `getSettings` / `updateSettings` messages ([js/background.js:750](js/background.js:750)). A separate `storage.onChanged` listener ([js/background.js:778](js/background.js:778)) re-applies enable/disable when settings sync from another device — so a toggle can trigger a full bookmark rewrite without any local user action.
+The popup talks to the worker through `getSettings` / `updateSettings` messages ([js/background.js:813](js/background.js:813)). A separate `storage.onChanged` listener ([js/background.js:841](js/background.js:841)) re-applies enable/disable when settings sync from another device — so a toggle can trigger a full bookmark rewrite without any local user action.
 
 Popup language (`lang`, EN/ZH) is stored separately in `storage.sync`. Popup strings live in the `I18N` object in [js/popup.js](js/popup.js) and are applied to `[data-i18n]` elements; any new popup text needs both a `data-i18n` attribute and entries in **both** language maps.
 
 ## Key Constraints and Known Traps
 
 - **Bookmark URLs are mutated in place.** Enable prefixes every http(s) bookmark; disable strips them. Chrome fires no pre-uninstall event, so uninstalling while enabled leaves prefixed URLs behind permanently.
-- **`chrome.bookmarks.onChanged` can loop.** It only re-prefixes when the prefix is absent ([js/background.js:383](js/background.js:383)); removing that guard causes an infinite update cycle.
-- **`DownloadItem` has no `tabId`.** [js/background.js:532](js/background.js:532) reads `downloadItem.tabId`, which is always `undefined`, so the dedup branch never fires and the fallback can open a second tab. Documented in [findings.md](findings.md) and fixed on the query-marker branches; do not assume it works here.
-- **`downloads.setUiOptions` silently fails.** The call at [js/background.js:837](js/background.js:837) needs the `"downloads.ui"` permission, which the manifest does not declare — it rejects and is swallowed. Adding the permission also suppresses download UI profile-wide, which is why the newer architecture eliminates the download entirely instead.
+- **`chrome.bookmarks.onChanged` can loop.** It only re-prefixes when the prefix is absent ([js/background.js:431](js/background.js:431)); removing that guard causes an infinite update cycle.
+- **`DownloadItem` has no `tabId`** — the download listener can never identify its own tab. Fixed by URL-keyed dedup (see above); the old `downloadItem.tabId` check was dead code that duplicated a tab on every click. **Never guess the tab with `tabs.query({active:true})`** — that is why `openInNewTab` deliberately has no active-tab fallback ([js/background.js:475](js/background.js:475)). Guessing produced the duplicate when `focusNewTab` was off, and collapsed "Open all bookmarks" onto a single tab when it was on.
+- **Reusing a tab requires `isReusableBlankTab`, not `isNewTabPage`.** `Tab.url` is `""` for anything not yet committed, so an empty url means *unknown*, not *blank*. `isReusableBlankTab` ([js/background.js:330](js/background.js:330)) consults `pendingUrl` and treats a tab loading our own `newtab@` marker as reusable — that case is load-bearing for "Open all bookmarks", where every fresh tab must navigate itself rather than get a second tab created for it. `isNewTabPage` keeps its permissive `!url → true` behaviour because `onCommitted`'s fallback still depends on it.
+- **`downloads.setUiOptions` silently fails.** The call at [js/background.js:900](js/background.js:900) needs the `"downloads.ui"` permission, which the manifest does not declare — it rejects and is swallowed. Adding the permission also suppresses download UI profile-wide, which is why the newer architecture eliminates the download entirely instead.
 - **Only `http(s)` URLs can carry the prefix.** `chrome://`, `edge://`, `about:`, `file://` bookmarks keep default behavior.
 - **Media on the source page can still be interrupted.** Chrome begins tearing down the renderer before extension code runs; Spotify is the reliable reproducer. This is inherent to MV3 and was not solved on this branch.
-- **Service worker keep-alive** is a 30s no-op alarm ([js/background.js:690](js/background.js:690)) — needed only because the downloads listener must be live; unreliable by design.
+- **Service worker keep-alive** is a 30s no-op alarm ([js/background.js:753](js/background.js:753)) — needed only because the downloads listener must be live; unreliable by design.
 - **README drift:** the permissions table lists `scripting` and describes a `window.stop()` + `history.back()` fallback. Neither exists in the manifest or the code on this branch.
 
 ## Generated / Non-Source Files
