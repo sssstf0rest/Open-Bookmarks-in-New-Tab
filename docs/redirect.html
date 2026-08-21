@@ -346,19 +346,40 @@
     //   The user can click through to their bookmark destination.
 
     (function () {
-      var redirectUrl = new URL(location.href).searchParams.get('url');
-      if (!redirectUrl) return;
+      var raw = new URL(location.href).searchParams.get('url');
+      if (!raw) return;
+
+      // Only ever follow an http(s) destination.
+      //
+      // This page takes its destination from the query string, and both uses
+      // below are live sinks: assigning a javascript: URL to location.replace
+      // executes it in THIS origin, and putting one in an <a href> hands the
+      // visitor a one-click XSS. A bookmark is not a trusted input — it syncs
+      // between machines and can be edited by hand or by another extension —
+      // so validate the scheme before either sink sees the value.
+      // Parsed with NO base on purpose. Passing location.href as a base would
+      // resolve a relative payload against this origin, so "//evil.com" would
+      // become an absolute redirect and plain garbage would silently redirect
+      // to a 404 here. Without a base, anything that is not already an
+      // absolute URL simply throws and the page stays inert.
+      var target;
+      try {
+        target = new URL(raw);
+      } catch (e) {
+        return; // not an absolute URL
+      }
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') return;
 
       // Show the redirect banner
       var banner = document.getElementById('redirect-banner');
       var link = document.getElementById('redirect-link');
       banner.style.display = 'block';
-      link.href = redirectUrl;
-      link.textContent = redirectUrl;
+      link.href = target.href;
+      link.textContent = target.href;
 
       // Auto-redirect after a short delay so the user sees the page
       setTimeout(function () {
-        location.replace(redirectUrl);
+        location.replace(target.href);
       }, 1500);
     })();
   </script>
