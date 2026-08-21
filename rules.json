@@ -5,12 +5,14 @@
     "action": {
       "type": "redirect",
       "redirect": {
-        "extensionPath": "/empty.zip"
+        "extensionPath": "/cancel.html"
       }
     },
     "condition": {
       "regexFilter": "^https?://newtab@",
-      "resourceTypes": ["main_frame"]
+      "resourceTypes": [
+        "main_frame"
+      ]
     }
   }
 ]

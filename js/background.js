@@ -47,7 +47,20 @@
 /** The marker username injected into bookmark URLs */
 const NEWTAB_PREFIX = "newtab@";
 
-/** Path to the dummy file that declarativeNetRequest redirects to */
+/**
+ * Page the declarativeNetRequest rule redirects the marker navigation to.
+ * The fetch handler below answers it with a typed 204 — see there.
+ */
+const CANCEL_PAGE_FILENAME = "cancel.html";
+const CANCEL_PAGE_URL = chrome.runtime.getURL(CANCEL_PAGE_FILENAME);
+
+/**
+ * Previous redirect target, kept for one release as the rollback path.
+ * Reverting rules.json to "/empty.zip" restores the old download-based
+ * cancellation without any other change; the file and its web_accessible_resources
+ * entry are still in place for exactly that. The download listener below also
+ * still recognises it.
+ */
 const EMPTY_ZIP_FILENAME = "empty.zip";
 
 /** ID of the static declarativeNetRequest ruleset declared in manifest.json */
@@ -84,6 +97,37 @@ const CREDENTIAL_STRIPPED_DOMAINS = [
   "outlook.office365.com",   // Outlook (365)
   "baidu.com",               // Baidu (Edge browser strips newtab@; covers left tab otherwise)
 ];
+
+// ─── Navigation Cancellation (typed 204) ─────────────────────────────────────
+// This is what stops a bookmark click from taking the current tab away.
+//
+// The DNR rule (rules.json) redirects the newtab@ marker navigation to
+// cancel.html, and this handler answers that request with a body-less, HTML-typed
+// HTTP 204. Chrome treats that as an ABORTED NO-CONTENT navigation: the source
+// tab keeps its document, and — unlike the previous empty.zip redirect — no
+// DownloadItem is ever created.
+//
+// Why that matters beyond hiding the download popup: Chrome closes a tab whose
+// navigation resolves to a download while the tab has nothing committed
+// (download_ui_controller.cc gates web_contents->Close() on
+// NavigationController::IsInitialNavigation()). That is what destroyed a
+// still-loading bookmark tab when the next bookmark was clicked. With no
+// DownloadItem, that code path is never reached at all.
+//
+// The Content-Type is load-bearing, not decoration: without it Chrome classifies
+// the response as an interrupted zero-byte download (SERVER_BAD_CONTENT).
+//
+// Must be registered at the top level, synchronously, so it exists the moment
+// the worker evaluates — a navigation can be waiting on it.
+self.addEventListener("fetch", (event) => {
+  if (event.request.url !== CANCEL_PAGE_URL) return;
+  event.respondWith(
+    new Response(null, {
+      status: 204,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    })
+  );
+});
 
 // ─── Default Settings ────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
@@ -132,6 +176,26 @@ const recentlyOpenedUrls = new Map(); // cleanUrl → seq
 
 /** How long a recentlyOpenedUrls / handledTabs entry stays valid (ms) */
 const HANDOFF_TTL_MS = 10000;
+
+/**
+ * Destination tabs this extension opened, until they commit their page.
+ *
+ * A tab that has not committed anything is fragile: if a navigation in it
+ * resolves to a download, Chrome closes it outright, and our own restore path
+ * would otherwise fall through to chrome.tabs.remove. Knowing that a tab is one
+ * of ours, and what it was loading, lets the restore path put it back instead
+ * of destroying a page the user is waiting for.
+ *
+ * Entry shape: tabId → { url, seq }
+ */
+const openedTabs = new Map();
+
+/**
+ * How long an openedTabs entry survives (ms). Generous, because the whole point
+ * is to cover a slow page load — this is the window during which a destination
+ * tab is still uncommitted.
+ */
+const OPENED_TAB_TTL_MS = 120000;
 
 /**
  * Monotonic id stamped on every handoff entry.
@@ -736,7 +800,20 @@ async function openInNewTab(cleanUrl, sourceTabId) {
     }
     // "end" is the default — Chrome appends to the end of the tab bar
 
-    await chrome.tabs.create(createOptions);
+    const created = await chrome.tabs.create(createOptions);
+
+    // Remember it until it commits. Until then it has no document of its own,
+    // so neither Chrome nor our restore path can tell it apart from a throwaway
+    // tab — and both would happily destroy it mid-load.
+    if (created && created.id !== undefined) {
+      const seq = ++handoffSeq;
+      openedTabs.set(created.id, { url: cleanUrl, seq });
+      setTimeout(() => {
+        const entry = openedTabs.get(created.id);
+        if (entry && entry.seq === seq) openedTabs.delete(created.id);
+      }, OPENED_TAB_TTL_MS);
+    }
+
     return { reused: false };
   } catch (err) {
     console.warn("[Bookmarks→NewTab] Error opening new tab:", err);
@@ -805,11 +882,22 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
 chrome.downloads.onCreated.addListener(async (downloadItem) => {
   const emptyZipUrl = chrome.runtime.getURL(EMPTY_ZIP_FILENAME);
+  const cancelUrl = CANCEL_PAGE_URL;
 
   // ── Detect whether this download belongs to us ─────────────────────
   const urlHasPrefix      = hasPrefix(downloadItem.url || "");
-  const finalUrlIsZip     = (downloadItem.finalUrl === emptyZipUrl);
-  const urlIsZip          = (downloadItem.url === emptyZipUrl);
+  // Both redirect targets are recognised. cancel.html should never produce a
+  // download at all — that is the whole point of the typed 204 — but if a Chrome
+  // build classifies the 204 as a zero-byte download instead (the documented
+  // SERVER_BAD_CONTENT behaviour when the Content-Type is missing), this listener
+  // still catches it and the extension degrades to its previous behaviour rather
+  // than leaving the user with a stuck download.
+  const finalUrlIsOurs = (
+    downloadItem.finalUrl === emptyZipUrl || downloadItem.finalUrl === cancelUrl
+  );
+  const urlIsOurs = (
+    downloadItem.url === emptyZipUrl || downloadItem.url === cancelUrl
+  );
   const referrerHasPrefix = hasPrefix(downloadItem.referrer || "");
 
   // A referrer carrying the marker is deliberately NOT enough on its own to
@@ -820,8 +908,15 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
   // is identified by its own URL: DownloadItem.url is the pre-redirect marker
   // URL, and finalUrl is our bundled empty.zip. The referrer is only used
   // below as a last resort for recovering the destination.
-  const isOurDownload = urlHasPrefix || finalUrlIsZip || urlIsZip;
+  const isOurDownload = urlHasPrefix || finalUrlIsOurs || urlIsOurs;
   if (!isOurDownload) return;
+
+  console.warn(
+    "[Bookmarks→NewTab] A download was created for a bookmark navigation. " +
+    "The typed-204 cancellation did not take effect on this Chrome build; " +
+    "falling back to cancelling the download.",
+    { url: downloadItem.url, finalUrl: downloadItem.finalUrl }
+  );
 
   // ── Recover the original bookmark URL ──────────────────────────────
   // Done BEFORE cancel/erase so the dedup decision below is made from state
@@ -893,6 +988,87 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 //   opened a new tab + recorded the tabId in handledTabs. We just need
 //   to restore the current tab.
 
+/**
+ * Returns true if this commit is the bookmark navigation we intercepted,
+ * rather than something the user did afterwards in the same tab.
+ *
+ * The restore paths below used to key on tabId alone. Because a handledTabs
+ * entry lives for HANDOFF_TTL_MS, that matched ANY commit in that tab inside
+ * the window — so with focusNewTab off, clicking a bookmark and then clicking a
+ * link on the source page within 10s made the tab jump backwards for no
+ * reason. A bookmark click commits as "auto_bookmark"; a link click commits as
+ * "link", which is what separates them. Server-side redirects keep the original
+ * transitionType and only add a qualifier, so a redirected bookmark still
+ * matches.
+ *
+ * @param {object} details  webNavigation.onCommitted details.
+ * @returns {boolean}
+ */
+/**
+ * Returns true if a committed URL is plausibly the destination we asked for.
+ *
+ * Exact equality is not enough: a destination routinely commits somewhere else
+ * after a server-side redirect (chat.openai.com → chatgpt.com, gmail.com →
+ * mail.google.com), which is the same reason the `reused` flag exists. Origin
+ * equality is the useful middle ground — close enough to recognise our own
+ * page, strict enough not to match an unrelated site.
+ *
+ * @param {string} committedUrl
+ * @param {string} intendedUrl
+ * @returns {boolean}
+ */
+function sameDestination(committedUrl, intendedUrl) {
+  if (committedUrl === intendedUrl) return true;
+  try {
+    return new URL(committedUrl).origin === new URL(intendedUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function isBookmarkNavigation(details) {
+  return (
+    details.transitionType === "auto_bookmark" ||
+    details.transitionType === "typed"
+  );
+}
+
+/**
+ * Puts a source tab back where it was after we opened its bookmark elsewhere.
+ *
+ * Order matters: go back if there is anywhere to go back to; otherwise, if this
+ * is a tab WE opened for a bookmark and which had not finished loading, put it
+ * back on the URL it was loading — never remove it. Removing it is only right
+ * for a throwaway tab that has neither history nor a destination of its own.
+ *
+ * @param {number} tabId
+ */
+async function restoreSourceTab(tabId) {
+  try {
+    await chrome.tabs.goBack(tabId);
+    return;
+  } catch (err) {
+    // No history — nothing to go back to.
+  }
+
+  const opened = openedTabs.get(tabId);
+  if (opened) {
+    // A destination tab of ours, still loading. Closing it would throw away the
+    // page the user is waiting for; re-issue its navigation instead. The load
+    // restarts, but the tab survives.
+    await chrome.tabs
+      .update(tabId, { url: opened.url })
+      .catch(() => {});
+    return;
+  }
+
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch (removeErr) {
+    await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
+  }
+}
+
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   // Only act on top-level frame navigations
   if (details.frameId !== 0) return;
@@ -900,6 +1076,16 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
   const urlHasPrefix = hasPrefix(details.url);
   const handled = handledTabs.get(details.tabId);
+
+  // Retire the openedTabs entry only once this tab has committed the very page
+  // we opened it for — that is the moment it stops being fragile. Do NOT retire
+  // it on any other commit: in Case B the commit is a DIFFERENT bookmark's
+  // destination landing in this tab, and that is exactly when restoreSourceTab
+  // needs the entry to know this tab is worth saving rather than closing.
+  const openedEntry = openedTabs.get(details.tabId);
+  if (openedEntry && sameDestination(details.url, openedEntry.url)) {
+    openedTabs.delete(details.tabId);
+  }
 
   // ── Tab was intentionally reused by openInNewTab ────────────────────
   // The source tab itself was a new-tab page and we navigated it directly
@@ -917,24 +1103,13 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // declarativeNetRequest could redirect it. We need to undo this
   // navigation so the current tab goes back to where it was.
   if (!urlHasPrefix && handled) {
+    // Only if this commit really is the bookmark navigation. Without this the
+    // entry matches any commit in the tab for the next 10s, including the user
+    // simply clicking a link.
+    if (!isBookmarkNavigation(details)) return;
+
     handledTabs.delete(details.tabId);
-
-    const tabId = details.tabId;
-
-    try {
-      // Try to go back to the previous page
-      await chrome.tabs.goBack(tabId);
-    } catch (err) {
-      // goBack fails if the tab has no history (e.g. Cmd+Click opened a
-      // new tab for the bookmark). In that case, close the duplicate tab
-      // since onBeforeNavigate already opened the URL in another tab.
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch (removeErr) {
-        // Last resort — navigate to new-tab page
-        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
-      }
-    }
+    await restoreSourceTab(details.tabId);
     return;
   }
 
@@ -944,18 +1119,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // If onBeforeNavigate already opened the new tab, just restore this tab
   if (handled) {
     handledTabs.delete(details.tabId);
-
-    const tabId = details.tabId;
-
-    try {
-      await chrome.tabs.goBack(tabId);
-    } catch (err) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch (removeErr) {
-        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
-      }
-    }
+    await restoreSourceTab(details.tabId);
     return;
   }
 
@@ -971,15 +1135,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   // and creating a second one here is the third duplicate-tab source.
   // Restore this tab instead of adding to the pile.
   if (recentlyOpenedUrls.has(cleanUrl)) {
-    try {
-      await chrome.tabs.goBack(tabId);
-    } catch (err) {
-      try {
-        await chrome.tabs.remove(tabId);
-      } catch (removeErr) {
-        await chrome.tabs.update(tabId, { url: "chrome://newtab" }).catch(() => {});
-      }
-    }
+    await restoreSourceTab(tabId);
     return;
   }
 
@@ -1236,21 +1392,20 @@ async function init() {
   // handled, so it cannot fight the listeners.
   await reconcileRuleset();
 
-  // Hide the download UI for our dummy empty.zip downloads (Chrome 117+).
-  // NOTE: this call needs the "downloads.ui" permission, which the manifest
-  // deliberately does not declare — that permission suppresses download UI
-  // profile-wide for every download from any source. So this always rejects
-  // and is swallowed below. Kept only to document the intent; do not "fix" it
-  // by adding the permission.
-  try {
-    await chrome.downloads.setUiOptions?.({ enabled: false });
-  } catch (err) {
-    // Not supported / not permitted — non-critical
-  }
+  // NOTE: there is no downloads.setUiOptions call here any more. It needed the
+  // "downloads.ui" permission the manifest does not declare, so it always
+  // rejected and did nothing — and with the typed-204 cancellation there is no
+  // download to hide in the first place.
 
   if (settings.enabled) {
     // Ensure keep-alive alarm is active (it may have been cleared if the
-    // service worker was terminated and restarted)
+    // service worker was terminated and restarted).
+    //
+    // This matters MORE than it used to. Chrome used to serve the redirect
+    // target straight from the extension bundle, needing no worker. Now the
+    // fetch handler above answers it, so a terminated worker has to boot before
+    // the marker navigation can be aborted — and the page the user is reading
+    // sits in a pending navigation until it does.
     await setupKeepAlive();
   }
 }

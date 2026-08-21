@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bookmark navigation cancelled</title>
+  <style>
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    This page should never be seen.
+
+    The declarativeNetRequest rule redirects the newtab@ marker navigation here,
+    and the service worker's fetch handler answers that request with a body-less,
+    HTML-typed HTTP 204. Chrome treats a typed 204 as an aborted no-content
+    navigation: the source tab keeps its document and no download is created.
+
+    This markup is only reached if the fetch handler did not intercept — e.g. the
+    service worker failed to start. In that case the source tab has already
+    navigated away, so step back to return the user to the page they were on.
+  -->
+  <p>Returning you to your page&hellip;</p>
+
+  <script>
+    // Only step back if there is somewhere to step back to. In a tab opened
+    // fresh for this navigation there is not, and calling back() would do
+    // nothing anyway.
+    if (window.history.length > 1) {
+      window.history.back();
+    }
+  </script>
+</body>
+</html>
