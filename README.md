@@ -1,6 +1,18 @@
+<p align="center">
+  <img src="icons/icon128.png" alt="Open Bookmarks in New Tab icon" width="128">
+</p>
+
+<h1 align="center">Open Bookmarks in New Tab</h1>
+
+<p align="center">
+  A Chrome extension that automatically opens bookmarks in a **new tab** instead of replacing your current page.
+</p>
+
+<!--
 # Open Bookmarks in New Tab
 
 A Chrome extension that automatically opens bookmarks in a **new tab** instead of replacing your current page.
+-->
 
 ## Background
 
