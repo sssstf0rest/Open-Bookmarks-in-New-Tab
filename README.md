@@ -5,7 +5,7 @@
 <h1 align="center">Open Bookmarks in New Tab</h1>
 
 <p align="center">
-  A Chrome extension that automatically opens bookmarks in a **new tab** instead of replacing your current page.
+  A Chrome extension that automatically opens bookmarks in a new tab instead of replacing your current page.
 </p>
 
 <!--
