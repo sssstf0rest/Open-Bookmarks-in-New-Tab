@@ -1,5 +1,20 @@
 # Progress Log
 
+## Session: 2026-09-12 — macOS empty.zip diagnosis
+
+### Follow-up: Chrome 153 and animation
+- User confirmed matching save-location setting on Windows and persistent animation on Mac with prompting off. Verified Mac update to 153.0.8010.37.
+- Compared relevant 152→153 browser source plus 151→153 animation controller; no new animation logic found.
+- Traced separately queued animation with no download-state recheck, explaining visible animation after cancellation/erasure. Corrected an intermediate inference by reading the later CANCELLED guard in DownloadUIController.
+- No extension source or browser settings modified. Exact onset/platform timing trigger remains unproven; setting toggle is not a fix.
+
+- Read contributor guidance and planning skill; preserved existing CLAUDE.md edits.
+- Verified installed Chrome 152.0.7977.83 and traced current blank/occupied navigation and download listeners.
+- Research and read-only settings inspection in progress; no extension source changes.
+- Completed release/source comparison and Mac preference inspection. User confirmed native Save As and Windows 153.0.8010.36.
+- Direct Gitiles source retrieval succeeded after web open errors; Gitiles history returned HTTP 401. Used exact-tag file diffs instead. Three relevant files are identical between 151.0.7922.138 and 152.0.7977.83; fourth changes Android only.
+- No live browser reproduction or download-setting mutation performed. Findings separate established mechanism from unproven update causation.
+
 ## Session: 2026-08-02 — Chrome Reliability and Security Fixes
 
 ### Phase 1: Branch and Baseline

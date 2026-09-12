@@ -1,5 +1,40 @@
 # Chrome Reliability Fix Findings
 
+## 2026-09-12 macOS popup investigation
+
+### Follow-up evidence
+- User reports Windows also has Ask where to save enabled; preference difference does not explain the platform difference.
+- Mac now verified at 153.0.8010.37. With prompting disabled, download animation still appears but empty.zip is absent from destination folder. This is consistent with cancellation working after the UI starts; no native event trace collected yet.
+- Earlier preference workaround is insufficient for the requested no-visible-download behavior.
+- Direct 152.0.7977.83→153.0.8010.37 comparison: mac file dialog, download_bubble_ui_controller.cc, and download_display_controller.cc unchanged. DownloadUIController changes security metrics and initial-navigation web-app closure, not the shared desktop UI gate. File picker adds request initiator to authority derivation. Download API adds ShouldExport filtering when looking up a download (under review).
+- Correction after reading the full function: DownloadUIController::OnDownloadUpdated passes its target-path gate for canceled items, but returns for CANCELLED at lines 282–284 before OnNewDownloadReady. Cancellation itself does not initiate the started-animation notification through this path.
+- Confirmed stronger animation mechanism in Chrome 153 download_toolbar_ui_controller.cc: UpdateDownloadIcon sets has_pending_download_started_animation_ and queues ShowPendingDownloadStartedAnimation. The latter checks animation eligibility/visible contents/button, but no DownloadItem state or existence. An already-queued animation can play after cancel+erase. DownloadItemModel animation eligibility excludes save-page packages and trusted extension-install downloads, not ordinary ZIP files served by an extension.
+- Chrome 153 download API lookup adds ShouldExport filtering for temporary/INTERNAL_API downloads; no evidence this classifies the ordinary navigation-triggered empty.zip or explains a Mac-only regression. Do not claim API breakage.
+- Compared download_toolbar_ui_controller.cc across 151.0.7922.138, 152.0.7977.83, and 153.0.8010.37: animation queue and playback functions unchanged. 151→152 other changes are include/destructor/profile refactors and offline-item initialization; 152→153 changes browser accessor/constructor handling. No identified new animation behavior explains onset.
+- Windows native file picker also just clears its listener on ListenerDestroyed; no evidence of a Windows-specific guaranteed cancellation advantage. Platform/profile scheduling remains a hypothesis requiring matched runtime traces, not a confirmed OS bug.
+- Animation source: https://chromium.googlesource.com/chromium/src/+/refs/tags/153.0.8010.37/chrome/browser/ui/views/download/bubble/download_toolbar_ui_controller.cc#511 and #833.
+- Tried obsolete download_toolbar_button_view.cc path (404); using current download_toolbar_ui_controller.cc next.
+
+- Current branch download-popup-fix uses the released static empty.zip DNR architecture.
+- Installed /Applications/Google Chrome.app version: 152.0.7977.83.
+- Occupied source uses tabs.create; blank committed source uses tabs.update with the clean URL, which can supersede the marked navigation before download creation.
+- Download cancellation and erasure happen after onCreated. UI suppression calls setUiOptions without downloads.ui and swallows the error.
+- Requested popup type and unaffected Windows version from user; not yet known.
+- Mac Default profile is last-used; Preferences has download.prompt_for_download=true and download_bubble.partial_view_enabled=false. This strongly points toward a save-location dialog, pending user confirmation.
+- The installed Web Store extension is 2.4.0 with empty.zip; Chrome release announcement dates 152.0.7977.82/.83 to September 3, 2026. The installed Info.plist mtime is September 9 (not proof of first relaunch).
+- Web retrieval of exact Chromium 152 source/log failed; attempt direct source retrieval before attributing a change to Chrome.
+- User confirmed native macOS Save As dialog; unaffected Windows version is 153.0.8010.36 (newer than installed Mac).
+- Direct Gitiles TEXT retrieval succeeded. Compared 151.0.7922.138 with 152.0.7977.83: download_file_picker.cc, extensions/api/downloads/downloads_api.cc, and select_file_dialog_mac.mm are byte-identical. download_target_determiner.cc differs only in Android incognito handling. This rules out a direct change in these four files, not changes elsewhere or field trials.
+- Chrome 152 DownloadTargetDeterminer checks IN_PROGRESS before requesting confirmation and selects PREFERENCE when PromptForDownload() is true. Cancellation arriving later cannot guarantee that no dialog has been initiated.
+- Installed Web Store background.js is byte-identical to repository background.js.
+- DownloadFilePicker in Chrome 152 handles FileSelected/FileSelectionCanceled by deleting itself, but OnDownloadDestroyed only clears download_item_. It does not close the picker when its DownloadItem is erased; this explains why an already-started dialog can outlive cancellation/history cleanup.
+- Diagnosis: confirmed unsafe architecture plus enabled save-location preference; observed behavior is consistent with prompt creation beating async cancellation. No event trace/A-B run collected, so the precise recent timing trigger is unproven. Windows preferences and previous Mac version are unavailable.
+- Immediate diagnostic/workaround: manually toggle Ask where to save each file OFF in chrome://settings/downloads and retry, then restore preferred setting. This affects all downloads and does not repair the underlying race.
+- Candidate durable fix: avoid creating DownloadItem entirely, e.g. local HTML-typed 204 cancellation; prior experiments are historical and require fresh Chrome 152/153 native-dialog validation. Adding downloads.ui is not a fix for the native save dialog and globally changes browser download UI.
+- Sources: https://chromereleases.googleblog.com/2026/09/stable-channel-update-for-desktop_01882797386.html ; https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.83/chrome/browser/download/download_target_determiner.cc ; https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.83/chrome/browser/download/download_file_picker.cc ; https://developer.chrome.com/docs/extensions/reference/api/downloads .
+
+Earlier findings below describe prior work and must not be assumed current.
+
 ## Required Fix Inventory
 
 ### Browser-confirmed defects

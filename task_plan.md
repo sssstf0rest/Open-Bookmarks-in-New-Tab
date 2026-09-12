@@ -1,5 +1,20 @@
 # Task Plan: Chrome Reliability and Security Fixes
 
+## Active investigation — 2026-09-12
+
+Follow-up: Mac updated to 153.0.8010.37; Windows 153.0.8010.36 has the same save prompt setting enabled without symptoms. Disabling it on Mac leaves download animation but no file.
+- [x] Compare 152→153 source and trace download animation versus cancellation.
+- [x] Revise diagnosis; do not attribute OS difference to preferences alone.
+
+Diagnose the macOS empty.zip popup reported after a Chrome update; no runtime edits authorized.
+- [x] Inspect current branch and installed Chrome version.
+- [x] Compare Chrome release/source changes and relevant local download settings.
+- [x] Explain confirmed causes, remaining uncertainty, and candidate fix.
+
+Result: native Save As confirmed, Mac prompt preference enabled, installed source matches checkout. Relevant 151→152 desktop code unchanged; exact update trigger remains unproven without pre-update reproduction. No runtime or browser configuration changes made.
+
+Earlier implementation plans below are historical, not current source state.
+
 ## Goal
 Create and publish a dedicated GitHub branch that fixes the confirmed audit defects and user-reported Chrome problems without touching the user's normal Chrome profile.
 
