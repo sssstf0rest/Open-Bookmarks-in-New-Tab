@@ -1,84 +1,78 @@
-<p align="center">
-  <img src="icons/icon-128.png" alt="Open Bookmarks in New Tab icon" width="128">
-</p>
-
-<h1 align="center">Open Bookmarks in New Tab</h1>
-
-<p align="center">
-  A Chrome extension that automatically opens bookmarks in a new tab instead of replacing your current page.
-</p>
-
-<!--
 # Open Bookmarks in New Tab
 
-A Chrome extension that automatically opens bookmarks in a **new tab** instead of replacing your current page.
--->
+A lightweight Chrome extension that opens HTTP(S) bookmarks in a new tab,
+with configurable focus and placement and automatic reuse of blank tabs.
+
+The current implementation stops marked navigations with a **local HTTP 204
+response**, not a dummy download. The user has confirmed this resolves their
+reported macOS download popup. Broader platform/media checks remain documented
+in [Testing](docs/testing.md); this branch is not a published store update.
+
+## Use
+
+Load this repository through **chrome://extensions → Developer mode → Load
+unpacked**, or install the published version from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo).
+The published version may differ from this branch.
+
+Keep using the same unpacked directory when reloading an existing installation.
+For a separate test installation, use an unsigned-in disposable Chrome profile
+without the store extension. Never run two copies against the same bookmarks.
+
+The popup supports English/Chinese, pause/resume, focus control, and placement
+at the end of the tab strip or immediately to the right.
+
+**Pause in the popup before disabling or uninstalling.** This restores bookmark
+URLs. Chrome does not provide a pre-uninstall cleanup event.
+
+## Development
+
+Node.js 18+ is needed for development commands. No dependencies or installation
+step are required; the extension itself uses only browser APIs.
+
+```sh
+npm run check   # Validate syntax, manifest/rules and runtime resource references
+npm test        # Run worker and packaging regression tests
+npm run build   # Recreate dist/extension with runtime files only
+```
+
+Load `dist/extension` for an isolated packaged-build test. The build recreates
+that generated folder: do not edit files there. It does not create a ZIP,
+publish a release, or modify the source manifest version.
+
+## Repository Layout
+
+- `manifest.json`, `rules.json`, `cancel.html`: extension configuration and cancellation endpoint.
+- `js/background.js`: synchronous 204 handler and worker entry point.
+- `js/worker/`: configuration, settings, URL handling, bookmarks, navigation, lifecycle.
+- `popup.html`, `js/popup.js`, `css/popup.css`, `icons/`: popup UI and assets.
+- `tests/`, `scripts/`: dependency-free verification and build tooling.
+- `docs/`: architecture, testing, hosted redirect and privacy policy.
+
+See [Architecture](docs/architecture.md) and [Repository Guidelines](AGENTS.md).
+Generated Chrome metadata and build output are ignored. Historical release
+archives and investigation logs are available in Git history.
+
+## Compatibility and Permissions
+
+Bookmarks retain the existing `newtab@` marker. Gmail/Outlook and other configured
+domains still use the hosted redirect wrapper; removing that helper would break
+existing bookmarks. Non-HTTP(S) bookmarks retain native browser behavior.
+New bookmarks are marked after a short editing delay to preserve save-dialog renaming.
+
+A 204 avoids replacing the source document but may still trigger page lifecycle
+handlers. Spotify continuity and incognito compatibility require separate tests.
+If problems occur, pause the extension and use Cmd/Ctrl-click.
+
+Permissions are limited to `bookmarks`, `tabs`, `storage`,
+`declarativeNetRequest`, `webNavigation`, and `<all_urls>` host access.
+There is no downloads permission, global download-UI suppression, or keep-alive
+alarm. Settings use Chrome sync storage; see the [privacy policy](docs/privacy-policy.html).
 
 ## Background
 
-This project is inspired by the [Open Bookmarks in a New Tab](https://chromewebstore.google.com/detail/open-bookmarks-in-a-new-t/mcecogccjlcplcccpnejnldpijppkfil) extension. It adopts the same core technique (the `newtab@` URL prefix trick) while addressing two issues found in the original:
-
-1. **No external redirects** — The original extension redirects bookmark requests through `bookmarks-evz.pages.dev`. This extension keeps everything local by redirecting to a bundled `empty.zip` file within the extension itself. Your bookmark traffic never touches a third-party server.
-
-2. **Smart empty-tab handling** — When the current tab is empty (Chrome's new tab page, `about:blank`, etc.), the bookmark opens **in that tab** instead of creating an unnecessary second tab.
-
-## How It Works
-
-The extension uses the **"newtab@ prefix" trick** (explained in detail in [this article](https://dev.to/vitalets/open-bookmarks-in-a-new-tab-by-default-easier-said-than-done-a3n) by Vitaliy Potapov):
-
-1. **Bookmark rewriting** — On install/enable, every bookmark URL is rewritten from `https://example.com` to `https://newtab@example.com`. The `newtab@` part uses the URL userinfo field ([RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.2.1)), which browsers and servers ignore — favicons and titles are preserved.
-
-2. **Redirect rule** — A `declarativeNetRequest` rule intercepts any main-frame request containing `newtab@` and redirects it to a dummy `empty.zip` file bundled with the extension. This triggers a download instead of a page navigation, so **the current tab is never touched**.
-
-3. **Download interception** — The `downloads` API catches the dummy download the instant it starts, cancels it (no file saved, no download bar), extracts the original URL, and opens it in a new tab. If the current tab is an empty/new-tab page, the bookmark loads there instead.
-
-4. **Fallback handler** — On browsers where the redirect rule doesn't fire (e.g. some Edge configurations), a `webNavigation` listener catches the `newtab@` URL and handles it gracefully using `window.stop()` + `history.back()` to minimise disruption to the original page.
-
-5. **Cleanup on disable** — When toggled off, all bookmark URLs are restored to their original form (prefix stripped).
-
-## Features
-
-- **Toggle on/off** — Pause the extension without uninstalling (bookmarks are automatically restored)
-- **Focus control** — Choose whether the new tab gets focus
-- **Tab placement** — Open new tabs at the end of the tab bar or right next to the current tab
-- **Auto-prefix** — Bookmarks added or edited while the extension is active are automatically prefixed
-- **Dark-themed popup** — Clean, compact settings UI
-
-## Installation
-
-### Chrome Web Store
-
-Install directly from the [Chrome Web Store](https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo).
-
-### Manual (Developer Mode)
-
-1. Clone or download this repository
-2. Open Chrome and go to `chrome://extensions/`
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked** and select the project folder
-5. The extension icon will appear in your toolbar — click it to configure
-
-## Known Limitations
-
-- **Media playback interruption on streaming pages** — When the current tab is a streaming page with active media (e.g. **Spotify Web Player**), clicking any bookmark may briefly interrupt playback. This is a fundamental Chrome Manifest V3 limitation: when a bookmark is clicked, Chrome begins navigating the current tab *before* any extension code can intervene. The `declarativeNetRequest` redirect operates at the network level, but the renderer has already started tearing down the page (disconnecting WebSockets, pausing media) by that point. There is no synchronous navigation-blocking API available to extensions in MV3. **Workaround:** Use **Ctrl+Click** or middle-click on bookmarks when on a streaming page to open them in a new tab natively without extension involvement.
-- **Missing favicons for Gmail and Outlook bookmarks** — Bookmarks pointing to Gmail (`mail.google.com`) and Outlook (`outlook.live.com`, `outlook.office.com`, etc.) are wrapped through a redirect page proxy because Chrome strips the `newtab@` prefix from these high-security domains. As a result, the bookmark's favicon/thumbnail will show the redirect page's icon instead of the original site's icon.
-- **Internal URLs** (`chrome://`, `edge://`, `about:`) cannot carry the `newtab@` prefix — these bookmarks retain their default click behavior. You can still Ctrl+Click or middle-click them to open in a new tab.
-- **Bookmark URLs are modified** — The `newtab@` prefix is visible if you inspect bookmark properties. Disabling the extension restores all URLs to their original form.
-- **Service worker keep-alive** — A 30-second alarm keeps the service worker alive so the download listener is always ready. This is a Chrome Manifest V3 limitation.
-
-## Permissions
-
-| Permission              | Reason                                                    |
-|-------------------------|-----------------------------------------------------------|
-| `bookmarks`             | Read and rewrite bookmark URLs with the `newtab@` prefix  |
-| `tabs`                  | Open new tabs, query active tab for placement             |
-| `storage`               | Persist user settings across sessions                     |
-| `downloads`             | Intercept and cancel the dummy `empty.zip` download       |
-| `declarativeNetRequest` | Redirect `newtab@` URLs to `empty.zip`                    |
-| `alarms`                | Keep-alive timer for the service worker                   |
-| `webNavigation`         | Fallback handler when the redirect rule doesn't fire      |
-| `scripting`             | Inject `window.stop()` + `history.back()` for restoration |
-| `<all_urls>` (host)     | Required by declarativeNetRequest and scripting APIs      |
+Inspired by [Open Bookmarks in a New Tab](https://chromewebstore.google.com/detail/open-bookmarks-in-a-new-t/mcecogccjlcplcccpnejnldpijppkfil)
+and Vitaliy Potapov's [description of the bookmark-prefix technique](https://dev.to/vitalets/open-bookmarks-in-a-new-tab-by-default-easier-said-than-done-a3n).
 
 ## License
 

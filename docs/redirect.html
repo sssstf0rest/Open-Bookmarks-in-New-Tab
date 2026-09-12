@@ -339,7 +339,7 @@
     //
     // Normal flow (extension installed & enabled):
     //   The declarativeNetRequest rule intercepts this URL before it loads
-    //   and redirects to empty.zip — this page never actually renders.
+    //   and redirects to the local HTML-typed 204 endpoint, cancel.html.
     //
     // Fallback flow (extension disabled or uninstalled):
     //   This page loads and shows the landing page with a redirect link.
