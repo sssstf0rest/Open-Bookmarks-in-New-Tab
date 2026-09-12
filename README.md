@@ -16,6 +16,12 @@ This project is inspired by the [Open Bookmarks in a New Tab](https://chromewebs
 
 2. **Smart empty-tab handling** — When the current tab is empty (Chrome's new tab page, `about:blank`, etc.), the bookmark opens **in that tab** instead of creating an unnecessary second tab. Native newly opened bookmark tabs can also be reused.
 
+## Installation
+
+### Chrome Web Store
+
+Install the published version from the [Chrome Web Store](https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo). The published version may differ from the current repository source.
+
 ## How It Works
 
 The extension uses the **"newtab@ prefix" trick** (explained in detail in [this article](https://dev.to/vitalets/open-bookmarks-in-a-new-tab-by-default-easier-said-than-done-a3n) by Vitaliy Potapov):
@@ -42,12 +48,6 @@ The background worker is organized into focused scripts under `js/worker/`. See 
 - **Native background opening** — Preserve background behavior for native bookmark tabs opened with Cmd/Ctrl-click or middle-click
 - **Automatic bookmark maintenance** — Mark new and edited bookmarks, with an editing delay to preserve save-dialog renaming
 - **Bilingual popup** — Compact, dark-themed settings in English and Chinese
-
-## Installation
-
-### Chrome Web Store
-
-Install the published version from the [Chrome Web Store](https://chromewebstore.google.com/detail/open-bookmarks-in-new-tab/kklcekgmidaafmelbbbmmgcfgfigghmo). The published version may differ from the current repository source.
 
 ### Manual (Developer Mode)
 
