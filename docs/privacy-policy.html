@@ -223,7 +223,7 @@
 
     <p class="meta">
       <strong>Open Bookmarks in New Tab</strong> &mdash; Chrome Extension<br />
-      Last updated: March 1, 2026
+      Last updated: September 12, 2026
     </p>
 
     <!-- ── 1. Overview ──────────────────────────────────────────────── -->
@@ -238,16 +238,16 @@
     <!-- ── 2. Data Collection ───────────────────────────────────────── -->
     <h2>2. Data Collection</h2>
     <div class="highlight">
-      <strong>This extension does NOT collect, transmit, or store any
-      personal data.</strong> It does not use analytics, tracking,
-      cookies, or any third-party services.
+      <strong>This extension includes no analytics or developer-run
+      data collection.</strong> It reads and modifies bookmark URLs
+      to implement its core behavior.
     </div>
     <p>
-      The only data stored by the extension is your local preferences
-      (enabled/disabled state, tab focus setting, and tab position).
-      These preferences are saved entirely on your device using
-      <code>chrome.storage.local</code> and are
-      <strong>never sent to any external server</strong>.
+      Preferences (enabled/disabled state, tab focus, position, and popup
+      language) use <code>chrome.storage.sync</code> and may sync through
+      Chrome according to your browser settings. IDs of bookmarks awaiting
+      delayed marking use <code>chrome.storage.session</code>. Modified
+      bookmark URLs may also sync through Chrome's bookmark synchronization.
     </p>
 
     <!-- ── 3. Permissions ───────────────────────────────────────────── -->
@@ -314,8 +314,8 @@
             <code>chrome.storage.sync</code>, which Chrome may sync
             between signed-in devices. Stored settings
             include: enabled/disabled state, focus preference, and
-            tab position. No personal data is stored. No data is
-            transmitted externally.
+            tab position and popup language. Pending bookmark IDs use
+            <code>chrome.storage.session</code> for worker recovery.
           </td>
         </tr>
         <tr>
@@ -337,26 +337,32 @@
     <!-- ── 4. Third-Party Services ──────────────────────────────────── -->
     <h2>4. Third-Party Services</h2>
     <p>
-      This extension does not use any third-party services, APIs,
-      analytics platforms, advertising networks, or tracking tools
-      of any kind.
+      The extension does not include analytics, advertising networks, or
+      tracking tools. Some special-domain bookmarks use a GitHub Pages
+      redirect helper. With interception working, navigation is redirected
+      locally before that page loads. If the helper loads as a fallback,
+      its request URL includes the encoded bookmark destination and is
+      sent to the hosting service. Destination websites receive normal
+      navigation requests when opened.
     </p>
 
     <!-- ── 5. Data Sharing ──────────────────────────────────────────── -->
     <h2>5. Data Sharing</h2>
     <p>
-      No data is shared with any third party. No data leaves your
-      device. The extension operates entirely locally.
+      The extension does not send bookmark or browsing data to a
+      developer-operated collection endpoint. Chrome synchronization,
+      destination websites, and the redirect helper fallback described
+      above may involve network transfers.
     </p>
 
     <!-- ── 6. Data Security ─────────────────────────────────────────── -->
     <h2>6. Data Security</h2>
     <p>
-      Since no personal data is collected or transmitted, there are
-      no data security risks associated with this extension beyond
-      standard browser security. User preferences are stored using
-      Chrome's built-in <code>chrome.storage.local</code> API, which
-      is sandboxed and protected by the browser.
+      Preferences and pending work use Chrome's extension storage APIs.
+      Bookmark URLs are modified in place, so back up important bookmarks
+      and pause the extension in its popup before disabling or uninstalling
+      it. Pausing restores the URL markers; Chrome does not provide a
+      pre-uninstall cleanup event.
     </p>
 
     <!-- ── 7. Remote Code ───────────────────────────────────────────── -->
@@ -364,17 +370,17 @@
     <p>
       This extension does not use any remote code. All JavaScript is
       bundled locally within the extension package. There are no
-      external <code>&lt;script&gt;</code> tags, no dynamically
-      loaded modules, and no use of <code>eval()</code> or similar
+      external <code>&lt;script&gt;</code> tags, no remotely
+      loaded extension scripts, and no use of <code>eval()</code> or similar
       functions.
     </p>
 
     <!-- ── 8. Children's Privacy ────────────────────────────────────── -->
     <h2>8. Children's Privacy</h2>
     <p>
-      This extension does not collect any data from anyone, including
-      children under the age of 13. It is suitable for users of all
-      ages.
+      The extension includes no age-targeted analytics or developer-run
+      collection of children's information. Its bookmark and settings
+      handling is described in the sections above.
     </p>
 
     <!-- ── 9. Changes to This Policy ────────────────────────────────── -->

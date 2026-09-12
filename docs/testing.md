@@ -1,11 +1,11 @@
-# Non-download Navigation Prototype
+# Browser and Regression Testing
 
-Branch: `codex/no-download-navigation`, based on main `bd975e4`.
-Version remains `2.4.0` during exploration; this is not a new store release.
+The current source uses local HTTP 204 navigation cancellation. Version remains
+`2.4.0`; this cleanup does not publish a new store release.
 
 ## Scope and Current Evidence
 
-The prototype replaces the packaged ZIP with a local, bodyless HTTP 204 response.
+The extension replaces the old dummy download with a local, bodyless HTTP 204 response.
 It retains `newtab@`, special-domain wrappers, popup settings, and bookmark
 migration. Explicit HTML content type is required; do not remove it. The fetch
 handler is registered before asynchronous initialization and never opens tabs.
@@ -15,17 +15,22 @@ Native new tabs are reused rather than relying on Chrome's download teardown.
 Navigation state is tab-specific and cleared on abort, later navigation, or tab
 removal. The fallback no longer closes an existing source tab on history failure.
 
-`node --test tests/*.test.cjs` tests the actual worker inside a mocked Chrome
+`npm test` tests the actual worker and its synchronous imports inside a mocked Chrome
 environment. Passing these tests does **not** verify browser MIME classification,
 native dialogs, service-worker waking, document preservation, or music playback.
-No Chrome 153 browser validation has been performed for this prototype yet.
+On 2026-09-12 the user reported that the prototype works perfectly, resolving their
+reported macOS issue. This is user-reported validation, not an independently run
+acceptance matrix. The structural cleanup preserves that implementation; reload
+and smoke-test it after updating. Cross-platform/media coverage remains pending.
 
 ## Safe Manual Setup
 
 1. Create a disposable Chrome profile **without signing in or enabling sync**.
    Do not install this prototype alongside the store version in the same profile.
 2. In `chrome://extensions`, enable Developer mode and Load unpacked using the
-   repository source directory. Existing release ZIPs are old and must not be used.
+   repository source directory. Alternatively, run `npm run build` and load
+   `dist/extension` in this separate test profile. Do not switch directories for
+   an existing installation or run both copies together.
 3. Add only test bookmarks. Allow at least five seconds after creation for marking;
    check bookmark properties or pause/resume in the popup to force migration.
 4. Set “Ask where to save each file before downloading” **on**. Leave it on for

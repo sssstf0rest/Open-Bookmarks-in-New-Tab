@@ -2,60 +2,63 @@
 
 ## Project Structure & Module Organization
 
-This is a dependency-free Chrome Manifest V3 extension. `js/background.js`
-handles bookmark rewriting, navigation, settings, and the local HTTP 204 response.
-`popup.html`, `js/popup.js`, and `css/popup.css` implement the bilingual popup.
-`manifest.json` declares permissions; `rules.json` redirects marked navigations
-to `cancel.html`. Icons live in `icons/`, Node regression tests in `tests/`, and
-the hosted redirect, privacy policy, and testing guide in `docs/`.
-Release ZIPs are historical distribution artifacts, not the current prototype.
-Never hand-edit `_metadata/generated_indexed_rulesets/`.
+This dependency-free Chrome Manifest V3 extension loads directly from the
+repository root. `js/background.js` registers the local HTML-typed HTTP 204
+handler, then synchronously loads `js/worker/` scripts for configuration,
+settings, URL helpers, bookmarks, navigation, and lifecycle.
+
+`popup.html`, `js/popup.js`, and `css/popup.css` implement the bilingual UI;
+icons live in `icons/`. `manifest.json`, `rules.json`, and `cancel.html`
+define extension resources. `tests/` contains regression tests; `scripts/`
+contains build/check tooling. Keep the hosted redirect and privacy policy
+at their existing `docs/` paths.
 
 ## Build, Test, and Development Commands
 
-No build step or package installation is needed. Use Node.js 18 or newer:
+Use Node.js 18 or newer. No package installation is required.
 
 ```sh
-node --test tests/*.test.cjs
-node --check js/background.js
-node --check js/popup.js
-python3 -m json.tool manifest.json >/dev/null
-python3 -m json.tool rules.json >/dev/null
+npm run check
+npm test
+npm run build
 git diff --check
 ```
 
-These run mocked-worker regression tests, syntax checks, and whitespace checks.
-For development, load this directory unpacked through `chrome://extensions` in
-a disposable, unsigned-in profile. Reload after edits; pause/resume in the popup
-when testing bookmark migration.
+`check` validates JavaScript syntax, JSON, permissions, and packaged references.
+`test` runs Node's built-in test runner. `build` recreates `dist/extension`
+with only allowlisted runtime assets; it does not produce a release ZIP.
+Update `scripts/project.mjs` when adding runtime files.
+
+Load the source directory unpacked in a disposable Chrome profile. Reload after
+edits; keep the same directory to preserve the installation identity. Never edit
+generated `dist/` or `_metadata/` files.
 
 ## Coding Style & Naming Conventions
 
-Follow two-space indentation, double-quoted JavaScript strings, and semicolons.
+Use two-space indentation, double-quoted JavaScript strings, and semicolons.
 Use `camelCase` for functions/variables and `UPPER_SNAKE_CASE` for constants.
-Preserve existing CSS custom properties and BEM-style classes. Add popup strings
-to both `I18N.en` and `I18N.zh`. No formatter or linter is configured.
+Worker scripts share a classic-worker global scope: preserve explicit load order
+and avoid duplicate bindings. Preserve CSS naming and add popup translations
+to both language maps. No formatter or linter is configured.
 
 ## Testing Guidelines
 
-Use Node's built-in test runner and name files `tests/*.test.cjs`. No coverage
-threshold is enforced. Test the actual worker with mocked APIs and deterministic
-event ordering. Add regression cases for navigation and settings changes.
-Mocks do not prove Chrome behavior: follow `docs/no-download-testing.md` for
-native bookmark clicks, folder opens, cold starts, LAN/Gmail, media playback,
-and download UI. Record OS, browser version, and unverified cases explicitly.
+Name tests `tests/*.test.cjs`; no coverage threshold is enforced. Test actual
+worker code and synchronous imports using mocked Chrome APIs. Packaging tests
+verify exact file contents and exclude development artifacts.
+Mocks cannot establish native browser behavior: follow `docs/testing.md` for
+download UI, cold starts, folder opens, LAN/Gmail, and media playback.
+Distinguish user-reported validation from directly observed results.
 
 ## Commit & Pull Request Guidelines
 
-History uses short descriptive subjects such as `fix saving name` and
-`update manifest version`; Conventional Commits are optional. Keep commits focused.
-PRs should explain changed behavior, linked issues, tests, and remaining browser
-risks. Include screenshots for popup changes. Do not regenerate release archives
-or bump the version until release validation is requested.
+History uses short descriptive subjects; Conventional Commits are optional.
+Keep commits focused. PRs should explain changed behavior, linked issues,
+verification, and remaining browser risks. Include screenshots for UI changes.
+Do not commit generated packages or bump versions without release scope.
 
-## Configuration & Safety
+## Safety
 
-Bookmark URLs are modified in place: back them up and pause before uninstalling.
-Preserve the HTML MIME type and synchronous fetch registration. Do not reintroduce
-dummy downloads or global download-UI suppression. Treat planning files and older
-architecture notes as historical; verify against current source.
+Preserve the 204 MIME type, synchronous registration, existing bookmark migration,
+and hosted helper URL. Pause before uninstalling to restore bookmarks.
+Use the three root planning files for complex work; keep them concise.

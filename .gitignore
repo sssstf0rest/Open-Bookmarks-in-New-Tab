@@ -1,3 +1,9 @@
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Generated extension/build output and local dependencies
+/_metadata/
+/dist/
+/node_modules/
+/*.zip

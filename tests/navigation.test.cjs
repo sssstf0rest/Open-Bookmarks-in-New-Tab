@@ -6,6 +6,10 @@ const vm = require("node:vm");
 
 const root = join(__dirname, "..");
 const source = readFileSync(join(root, "js/background.js"), "utf8");
+const workerScripts = [...source.matchAll(/"(worker\/[^"]+\.js)"/g)].map((match) => match[1]);
+const workerSource = [source, ...workerScripts.map((path) =>
+  readFileSync(join(root, "js", path), "utf8")
+)].join("\n");
 const cancelUrl = "chrome-extension://test-extension/cancel.html";
 const marked = "https://newtab@example.com/";
 const clean = "https://example.com/";
@@ -77,6 +81,12 @@ function harness(options = {}) {
     },
   };
   const context = vm.createContext({
+    importScripts: (...paths) => {
+      for (const path of paths) {
+        assert(workerScripts.includes(path), "Only declared local worker scripts can be imported");
+        vm.runInContext(readFileSync(join(root, "js", path), "utf8"), context, { filename: path });
+      }
+    },
     chrome, URL, Response,
     self: { addEventListener(name, fn) { listeners[name] = fn; } },
     console: { log() {}, warn() {} },
@@ -100,7 +110,7 @@ test("DNR and manifest expose only the non-download cancellation endpoint", () =
   assert.deepEqual(rules[0].condition.resourceTypes, ["main_frame"]);
   assert(new RegExp(rules[0].condition.regexFilter).test(marked));
   assert(!new RegExp(rules[0].condition.regexFilter).test(clean));
-  assert.doesNotMatch(source, /chrome\.(downloads|alarms)\b|empty\.zip/);
+  assert.doesNotMatch(workerSource, /chrome\.(downloads|alarms)\b|empty\.zip/);
   assert.match(readFileSync(join(root, "cancel.html"), "utf8"), /<!doctype html>/i);
 });
 
