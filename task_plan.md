@@ -1,5 +1,24 @@
 # Task Plan: Chrome Reliability and Security Fixes
 
+## Active prototype — 2026-09-12
+
+User authorized a new branch from main and implementation of a non-download interceptor.
+Branch: `codex/no-download-navigation`, based on `main` / `origin/main` at `bd975e4`.
+
+- [x] Confirm clean checkout, fetch main, create branch, review current source.
+- [x] Replace ZIP with local HTML-typed 204; retain bookmark marker/domain migration.
+- [x] Remove download APIs and add focused regression tests for fetch/navigation handoff.
+- [x] Run automated checks and document isolated-browser acceptance tests.
+- [ ] Validate in real Chrome 153; pending DevTools MCP extension tooling.
+
+Constraints: no changes to personal Chrome profile, no release/version bump yet, no regenerated store ZIPs. Earlier plans below are historical, not this prototype's verification.
+
+Tooling blocker: Chrome DevTools MCP lacks extension tools. Its skill requires `--categoryExtensions` and server restart before extension testing. Continue code/static tests; do not substitute them for browser evidence.
+
+Implementation note: removed the second download-driven opener and URL-global dedup. Native newly created tabs now reuse a no-content navigation rather than relying on download teardown. Handoffs are invalidated by later navigations/204 aborts so they cannot restore an unrelated page.
+
+Errors: first edit orchestration had a JavaScript quoting syntax error before execution; corrected it and applied changes with apply_patch. No partial edit occurred.
+
 ## Goal
 Create and publish a dedicated GitHub branch that fixes the confirmed audit defects and user-reported Chrome problems without touching the user's normal Chrome profile.
 

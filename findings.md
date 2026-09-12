@@ -1,5 +1,17 @@
 # Chrome Reliability Fix Findings
 
+## Active 204 prototype — 2026-09-12
+
+- Created `codex/no-download-navigation` directly from current main (`bd975e4`); prior investigation remains on `download-popup-fix`. Checkout was clean.
+- Current production uses `newtab@`, special-domain GitHub Pages wrapping, static DNR redirect to empty.zip, and downloads.onCreated cancellation. Keep the marker scheme unchanged.
+- Prototype will return a bodyless local 204 with explicit `Content-Type: text/html; charset=utf-8` and `Cache-Control: no-store`. MIME type matters: earlier historical browser experiments saw downloads without it; fresh Chrome 153 verification is still required.
+- HTTP 204 is specified to avoid replacing the current document; a navigation may still fire beforeunload. Do not promise Spotify continuity without direct testing.
+- Sources: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/204 ; https://developer.chrome.com/docs/extensions/develop/concepts/network-requests .
+- DevTools MCP has list_pages but no install_extension/list_extensions. Extension testing is blocked pending `--categoryExtensions` and restart, per the Chrome DevTools skill.
+- Implemented exact local fetch matching and typed 204; removed ZIP asset, downloads permission/listener/UI suppression, and keep-alive alarm/permission. The deleted ZIP is recoverable from main; historical release archives are unchanged.
+- Removed URL-wide download dedup. Tab-scoped handoffs register before awaiting settings, reuse native new tabs, invalidate on later navigation and abort, and never close an existing tab on fallback failure. This is necessary adaptation to removing download-triggered tab teardown, not a bookmark-format rewrite.
+- 25 Node tests pass against actual background source with mocked Chrome APIs. They establish response construction/event logic, NOT real Chrome fetch dispatch, native-tab metadata timing, or UI/media behavior. Fresh browser validation is explicitly pending.
+
 ## Required Fix Inventory
 
 ### Browser-confirmed defects

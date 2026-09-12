@@ -5,7 +5,7 @@
     "action": {
       "type": "redirect",
       "redirect": {
-        "extensionPath": "/empty.zip"
+        "extensionPath": "/cancel.html"
       }
     },
     "condition": {

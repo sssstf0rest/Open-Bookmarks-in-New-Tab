@@ -7,9 +7,7 @@
     "bookmarks",
     "tabs",
     "storage",
-    "downloads",
     "declarativeNetRequest",
-    "alarms",
     "webNavigation"
   ],
   "host_permissions": [
@@ -29,7 +27,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["empty.zip"],
+      "resources": ["cancel.html"],
       "matches": ["<all_urls>"]
     }
   ],

@@ -1,5 +1,16 @@
 # Progress Log
 
+## Session: 2026-09-12 — authorized non-download prototype
+
+- Read planning and Chrome DevTools skills; fetched main; created `codex/no-download-navigation` from `bd975e4` with a clean working tree.
+- Reviewed current source (not historical rewrite), manifest, static rules, and guidance. No personal browser settings/bookmarks modified.
+- Browser extension tooling unavailable; reported required MCP flag/restart. Proceeding with implementation and automated tests only until it is available.
+- Implemented synchronous typed-204 fetch response and replaced the static redirect target. Removed the legacy ZIP, downloads API paths, alarm, and URL-wide deduplication.
+- Added tab-scoped navigation handoff changes and 25 regression tests; all pass. No production browser profile, settings, or bookmarks touched.
+- Updated README, privacy permission description, contributor guidance, historical CLAUDE override, and disposable-profile test matrix. Existing release archives/version remain unchanged.
+- Final local checks: 25/25 tests pass on Node v22.22.0; both JavaScript syntax checks, manifest/rules JSON parsing, and git diff --check pass. Popup/CSS/hosted redirect code are unchanged from main. Changes are uncommitted and local; no push or release performed.
+- Browser verification remains pending, not passed: required MCP extension tools are unavailable. Test guide records this explicitly; normal Chrome profile remains untouched.
+
 ## Session: 2026-08-02 — Chrome Reliability and Security Fixes
 
 ### Phase 1: Branch and Baseline

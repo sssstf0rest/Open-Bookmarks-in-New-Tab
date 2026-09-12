@@ -1,5 +1,19 @@
 # CLAUDE.md
 
+## Current Prototype Override — 2026-09-12
+
+On `codex/no-download-navigation`, use `AGENTS.md`, current source, and
+`docs/no-download-testing.md` as authoritative. This branch starts from main
+`bd975e4` and retains the released `newtab@`/proxy marker format, but replaces
+empty.zip with a synchronously registered HTML-typed HTTP 204 at `cancel.html`.
+There are no download APIs, alarm, or URL-global deduplication map. Native new
+tabs can be reused because the download teardown no longer applies. Navigation
+records a tab-specific handoff before awaiting stored settings. Unit tests use
+`node --test tests/*.test.cjs`; Chrome 153 verification remains pending.
+
+The architecture notes below describe older branches and are historical, not
+instructions to reintroduce the dummy download or its old blank-tab restrictions.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview

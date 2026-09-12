@@ -16,9 +16,15 @@ A Chrome extension that automatically opens bookmarks in a **new tab** instead o
 
 ## Background
 
+> **Experimental branch:** `codex/no-download-navigation` replaces the dummy
+> download with a local HTML-typed HTTP 204. Automated logic tests pass; real
+> Chrome 153/macOS and Windows validation is still pending. The checked-in release
+> ZIPs contain the old extension. Test the source directory, not those archives.
+> See [the testing guide](docs/no-download-testing.md).
+
 This project is inspired by the [Open Bookmarks in a New Tab](https://chromewebstore.google.com/detail/open-bookmarks-in-a-new-t/mcecogccjlcplcccpnejnldpijppkfil) extension. It adopts the same core technique (the `newtab@` URL prefix trick) while addressing two issues found in the original:
 
-1. **No external redirects** — The original extension redirects bookmark requests through `bookmarks-evz.pages.dev`. This extension keeps everything local by redirecting to a bundled `empty.zip` file within the extension itself. Your bookmark traffic never touches a third-party server.
+1. **Local navigation cancellation** — The original extension redirects bookmark requests through `bookmarks-evz.pages.dev`. This prototype stops marked navigations using a local HTTP 204 response. Existing Gmail/Outlook and other special-domain bookmark wrappers still use a GitHub Pages URL; those wrappers are unchanged.
 
 2. **Smart empty-tab handling** — When the current tab is empty (Chrome's new tab page, `about:blank`, etc.), the bookmark opens **in that tab** instead of creating an unnecessary second tab.
 
@@ -28,11 +34,11 @@ The extension uses the **"newtab@ prefix" trick** (explained in detail in [this 
 
 1. **Bookmark rewriting** — On install/enable, every bookmark URL is rewritten from `https://example.com` to `https://newtab@example.com`. The `newtab@` part uses the URL userinfo field ([RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.2.1)), which browsers and servers ignore — favicons and titles are preserved.
 
-2. **Redirect rule** — A `declarativeNetRequest` rule intercepts any main-frame request containing `newtab@` and redirects it to a dummy `empty.zip` file bundled with the extension. This triggers a download instead of a page navigation, so **the current tab is never touched**.
+2. **Non-download response** — A `declarativeNetRequest` rule redirects marked main-frame requests to `cancel.html`. A synchronously registered service-worker fetch handler responds with an empty HTTP `204`, `Content-Type: text/html; charset=utf-8`, and `Cache-Control: no-store`. This is intended to preserve the source document without creating a download.
 
-3. **Download interception** — The `downloads` API catches the dummy download the instant it starts, cancels it (no file saved, no download bar), extracts the original URL, and opens it in a new tab. If the current tab is an empty/new-tab page, the bookmark loads there instead.
+3. **One navigation handler** — `webNavigation.onBeforeNavigate` opens the clean destination using the exact source tab and stored focus/placement settings. Blank pages and native newly opened tabs are reused. There is no download listener or download-history cleanup.
 
-4. **Fallback handler** — On browsers where the redirect rule doesn't fire (e.g. some Edge configurations), a `webNavigation` listener catches the `newtab@` URL and handles it gracefully using `window.stop()` + `history.back()` to minimise disruption to the original page.
+4. **Compatibility fallback** — If interception is bypassed and the source actually commits, a correlated handoff can attempt `tabs.goBack()`. It never closes the source on failure. If the primary event was missed, the committed marker is cleaned in place. These fallbacks cannot guarantee uninterrupted media.
 
 5. **Cleanup on disable** — When toggled off, all bookmark URLs are restored to their original form (prefix stripped).
 
@@ -60,25 +66,36 @@ Install directly from the [Chrome Web Store](https://chromewebstore.google.com/d
 
 ## Known Limitations
 
-- **Media playback interruption on streaming pages** — When the current tab is a streaming page with active media (e.g. **Spotify Web Player**), clicking any bookmark may briefly interrupt playback. This is a fundamental Chrome Manifest V3 limitation: when a bookmark is clicked, Chrome begins navigating the current tab *before* any extension code can intervene. The `declarativeNetRequest` redirect operates at the network level, but the renderer has already started tearing down the page (disconnecting WebSockets, pausing media) by that point. There is no synchronous navigation-blocking API available to extensions in MV3. **Workaround:** Use **Ctrl+Click** or middle-click on bookmarks when on a streaming page to open them in a new tab natively without extension involvement.
+- **Media playback needs browser testing** — A 204 can preserve the source document but may still trigger page lifecycle handlers such as `beforeunload`. Spotify continuity is not established by the automated tests. **Workaround:** pause the extension in its popup first, then use Cmd/Ctrl-click or middle-click.
 - **Missing favicons for Gmail and Outlook bookmarks** — Bookmarks pointing to Gmail (`mail.google.com`) and Outlook (`outlook.live.com`, `outlook.office.com`, etc.) are wrapped through a redirect page proxy because Chrome strips the `newtab@` prefix from these high-security domains. As a result, the bookmark's favicon/thumbnail will show the redirect page's icon instead of the original site's icon.
 - **Internal URLs** (`chrome://`, `edge://`, `about:`) cannot carry the `newtab@` prefix — these bookmarks retain their default click behavior. You can still Ctrl+Click or middle-click them to open in a new tab.
-- **Bookmark URLs are modified** — The `newtab@` prefix is visible if you inspect bookmark properties. Disabling the extension restores all URLs to their original form.
-- **Service worker keep-alive** — A 30-second alarm keeps the service worker alive so the download listener is always ready. This is a Chrome Manifest V3 limitation.
+- **Bookmark URLs are modified** — The `newtab@` prefix is visible in bookmark properties. Pause in the popup to restore URLs before disabling or uninstalling; Chrome does not provide a pre-uninstall cleanup event.
+- **Compatibility is experimental** — Cold worker starts, native bookmark clicks, folder opens, incognito, and Chrome 153 behavior need real-browser validation. If the visible `cancel.html` warning appears, the worker did not supply the 204; pause and report it.
+
+## Development Checks
+
+No build or package installation is needed. With Node.js 18 or newer:
+
+```sh
+node --test tests/*.test.cjs
+node --check js/background.js
+node --check js/popup.js
+git diff --check
+```
+
+The Node tests mock Chrome APIs and exercise response headers, tab handoffs,
+settings, and bookmark restoration. They do not simulate Chrome's download UI.
 
 ## Permissions
 
 | Permission              | Reason                                                    |
 |-------------------------|-----------------------------------------------------------|
 | `bookmarks`             | Read and rewrite bookmark URLs with the `newtab@` prefix  |
-| `tabs`                  | Open new tabs, query active tab for placement             |
+| `tabs`                  | Open/reuse tabs and read the exact source tab for placement |
 | `storage`               | Persist user settings across sessions                     |
-| `downloads`             | Intercept and cancel the dummy `empty.zip` download       |
-| `declarativeNetRequest` | Redirect `newtab@` URLs to `empty.zip`                    |
-| `alarms`                | Keep-alive timer for the service worker                   |
-| `webNavigation`         | Fallback handler when the redirect rule doesn't fire      |
-| `scripting`             | Inject `window.stop()` + `history.back()` for restoration |
-| `<all_urls>` (host)     | Required by declarativeNetRequest and scripting APIs      |
+| `declarativeNetRequest` | Redirect marked navigations to the local 204 endpoint     |
+| `webNavigation`         | Detect and correlate marked navigations                  |
+| `<all_urls>` (host)     | Required for declarativeNetRequest redirects             |
 
 ## License
 
