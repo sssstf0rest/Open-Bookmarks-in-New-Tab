@@ -1,5 +1,21 @@
 # Task Plan: Repository Cleanup
 
+## Active GitHub draft — 2026-09-13
+
+User requested a GitHub release draft. Create an unpublished v2.5.0 draft with notes and the previously verified ZIP; no source commit/push or public release.
+- [x] Confirm repository, current version, existing releases and archive.
+- [x] Verify release target against archive; prepare notes describing actual changes and limitations.
+- [x] Create draft, attach ZIP, verify draft status and asset; return URL.
+
+## Active release packaging — 2026-09-13
+
+Generate a Chrome Web Store upload ZIP from current main, without uploading or publishing it.
+- [x] Inspect source and packaging boundary: manifest already uses 2.5.0; package.json still uses 2.4.0.
+- [x] Align package metadata to the existing manifest version, run checks/tests, build runtime folder.
+- [x] Create a new 2.5.0 ZIP, verify integrity/content/version and provide its path.
+
+The release request authorizes local packaging; earlier cleanup-only constraints below are historical. Preserve runtime code, exclude generated Chrome metadata, and do not commit/push/upload.
+
 ## Goal
 Reorganize the user-confirmed working HTTP 204 extension without changing bookmark behavior. Continue on `codex/no-download-navigation` from committed baseline `3e2f9c4`.
 

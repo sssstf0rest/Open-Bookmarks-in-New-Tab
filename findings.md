@@ -1,5 +1,17 @@
 # Repository Cleanup Findings
 
+## GitHub release draft — 2026-09-13
+- Latest existing release is v2.4.0; no v2.5.0 draft appears in the release list. Current main runtime manifest is 2.5.0.
+- Local changes are the packaging metadata fix and planning records; do not commit them implicitly. Verify packaged runtime against the selected remote commit before attaching it to a draft.
+- Remote main advanced by a README-only commit to c512f280ecec0e3e47afa5e8e2c2510bbecfb8d3; use that explicit release target. No existing v2.5.0 tag was found. ZIP SHA-256 remains the verified packaging hash.
+
+## Release packaging — 2026-09-13
+- Current main is clean; manifest version is already 2.5.0, while package.json remained 2.4.0. Align only development package metadata so the existing version-consistency check passes.
+- Build allowlist contains 17 runtime files. ZIP must contain manifest.json at its root, with no outer extension directory, metadata, planning files, tests, tooling, or old ZIPs.
+- Confirmed official packaging/update guidance: https://developer.chrome.com/docs/webstore/prepare and https://developer.chrome.com/docs/webstore/update . Actual published version was not checked in the dashboard; archive retains the user's existing 2.5.0 manifest version.
+- Created dist/Open-Bookmarks-in-New-Tab-v2.5.0.zip (22,304 bytes), exactly 17 runtime files. All archived files match source and build byte-for-byte; unzip CRC checks pass; root manifest version is 2.5.0.
+- SHA-256: fa916cad9068158c3bf13b0ceb4d2a515ca95db51bedbe629df1e30486898ea3.
+
 - Baseline: clean branch `codex/no-download-navigation`, commit `3e2f9c4`, already tracking origin.
 - User confirmed the HTTP 204 prototype works. Preserve its implementation rather than redesigning the marker or navigation algorithm.
 - Runtime: manifest/rules, cancel page, background worker, popup HTML/JS/CSS, and icons. Hosted `docs/redirect.html` is still needed for existing special-domain bookmark wrappers; privacy policy is also retained at its published path.

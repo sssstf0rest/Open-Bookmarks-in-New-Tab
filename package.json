@@ -1,6 +1,6 @@
 {
   "name": "open-bookmarks-in-new-tab",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "description": "Dependency-free Chrome extension with local HTTP 204 navigation cancellation",
   "engines": { "node": ">=18" },
