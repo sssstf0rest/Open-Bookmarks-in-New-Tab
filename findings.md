@@ -1,5 +1,13 @@
 # Repository Cleanup Findings
 
+## Pages queue investigation — 2026-09-13
+- Latest Pages workflow 34713882106 is queued at cde81752d0a5a802050c9aabe9c2bc1ecc131049, created 2026-09-12 19:20:19 UTC. Prior run 34712194807 succeeded at c512f280ecec0e3e47afa5e8e2c2510bbecfb8d3.
+- Pages uses GitHub's legacy branch publishing from main:/docs. Screenshot says Waiting for a runner; no evidence of a code-level build hang.
+- GitHub Status currently lists Actions and Pages operational, with no incidents reported September 12–13. This does not rule out a repository-specific queue problem. Source: https://www.githubstatus.com/ .
+- Build job 103607420489 has status queued, runner_id/runner_name null and steps empty: no build execution has begun. Prior deployment finished successfully at 2026-09-12 18:47:17 UTC.
+- Queued commit changes only package.json and three planning files, not docs/. Live privacy-policy.html and redirect.html both return HTTP 200 and match queued-commit source byte-for-byte; last-modified is 2026-09-12 18:47:12 UTC.
+- Conclusion: stalled runner allocation/scheduling, exact infrastructure/account cause unproven. Existing hosted pages are current; no evidence of a project build error. Recommend cancelling stale run, optionally rerun once to verify scheduling recovery; no action taken remotely.
+
 ## GitHub release draft — 2026-09-13
 - Latest existing release is v2.4.0; no v2.5.0 draft appears in the release list. Current main runtime manifest is 2.5.0.
 - Local changes are the packaging metadata fix and planning records; do not commit them implicitly. Verify packaged runtime against the selected remote commit before attaching it to a draft.

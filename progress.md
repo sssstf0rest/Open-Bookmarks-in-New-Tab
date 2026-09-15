@@ -1,5 +1,9 @@
 # Cleanup Progress
 
+## 2026-09-13 — Pages queue diagnosis
+- Inspected screenshot, Actions API, Pages source configuration and GitHub status. Latest run is queued, previous run succeeded. No remote writes or workflow cancellation performed.
+- Confirmed no runner assigned and zero steps started. Compared queued commit to prior deployment: only package/planning edits. Both live hosted pages return 200 and match current source byte-for-byte. Diagnosis complete; stale run can be cancelled without needing a content redeploy. Exact runner scheduling cause remains unconfirmed.
+
 ## 2026-09-13 — GitHub release draft
 - Read planning guidance, checked main status and existing GitHub releases. Preparing an unpublished v2.5.0 draft and existing verified ZIP attachment.
 - Created draft v2.5.0 targeting remote main c512f280ecec0e3e47afa5e8e2c2510bbecfb8d3, with release notes and the 22,304-byte ZIP. All 17 archived files match that commit. Verified isDraft=true and uploaded asset digest matches local SHA-256. Nothing published or committed.

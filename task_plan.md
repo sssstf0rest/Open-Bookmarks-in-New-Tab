@@ -1,5 +1,12 @@
 # Task Plan: Repository Cleanup
 
+## Active Pages diagnosis — 2026-09-13
+- [x] Inspect stalled workflow and preceding successful deployment.
+- [x] Check runner allocation, changed files and live hosted pages.
+- [x] Explain impact and recommend next steps; do not cancel/rerun without a request.
+
+Screenshot and GitHub API show workflow 34713882106 queued, not actively building. Investigation only.
+
 ## Active GitHub draft — 2026-09-13
 
 User requested a GitHub release draft. Create an unpublished v2.5.0 draft with notes and the previously verified ZIP; no source commit/push or public release.
