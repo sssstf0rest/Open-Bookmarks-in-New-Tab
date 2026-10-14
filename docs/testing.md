@@ -1,7 +1,7 @@
 # Browser and Regression Testing
 
 The current source uses local HTTP 204 navigation cancellation. Version remains
-`2.4.0`; this cleanup does not publish a new store release.
+`2.5.0`; local repairs do not publish a new store release.
 
 ## Scope and Current Evidence
 
@@ -31,8 +31,10 @@ and smoke-test it after updating. Cross-platform/media coverage remains pending.
    repository source directory. Alternatively, run `npm run build` and load
    `dist/extension` in this separate test profile. Do not switch directories for
    an existing installation or run both copies together.
-3. Add only test bookmarks. Allow at least five seconds after creation for marking;
-   check bookmark properties or pause/resume in the popup to force migration.
+3. Add only test bookmarks. A newly saved bookmark stays unmarked while its page
+   is selected in any window. Switch to another tab, navigate away, or close the
+   page, then allow at least five seconds for marking. Check its stored URL in
+   the bookmark manager. Resume also respects this editing protection.
 4. Set “Ask where to save each file before downloading” **on**. Leave it on for
    the first test pass, then repeat with it off in this disposable profile only.
 5. Record the exact OS and Chrome version. Initial targets: macOS ARM
@@ -62,6 +64,61 @@ Perform both warm-worker and cold-worker trials: close the worker inspector,
 wait at least 60 seconds, and confirm inactivity in `chrome://extensions` before
 clicking. Keeping DevTools attached can prevent suspension and hide cold-start
 bugs. Use actual bookmark-bar/menu clicks, not only `tabs.update()` simulations.
+
+## Native Bookmark Save Dialog
+
+The folder-selector repair addresses a supported URL-lookup race. The reported
+persistent freeze has not yet been independently reproduced in native Chrome.
+See [the investigation](bookmark-folder-selector.md) for source evidence and
+limits. Worker mocks cannot establish whether a native dialog opens or freezes.
+
+Use one disposable, normal Chrome profile for the enabled/paused comparison;
+pause through the extension popup so stored URLs are restored. Incognito changes
+several conditions and does not by itself isolate the extension as the cause.
+Record Chrome version, OS, extension state, worker state, and actual results.
+
+On the original source, before applying the repair:
+
+1. Open a unique HTTP(S) test page, press Cmd/Ctrl+D, and keep the native bookmark
+   bubble open for more than five seconds. If Chrome presents a simplified save
+   flow, open its editing controls before waiting.
+2. Open the Folder dropdown and select “Choose another folder.” Record whether
+   the folder tree opens; also test a changed name, a recent-folder selection,
+   and the bubble's Remove action on separate test bookmarks.
+3. Repeat immediately with the popup paused, using fresh test URLs/bookmarks.
+   Compare results in this same profile. A failure appearing only after the
+   enabled URL rewrite supports the race; record any longer-lived freeze
+   separately rather than treating it as established by this test.
+
+On the repaired source, require all of the following:
+
+| Scenario | Required result |
+| --- | --- |
+| Bubble open longer than five seconds, including 60 seconds | Stored URL stays clean; “Choose another folder” opens the native folder tree |
+| Rename, choose a recent folder, choose a different folder in the tree | Saved title and parent folder match the user's choices |
+| Remove from the bubble while pending | Bookmark is removed; pending work does not recreate it |
+| Switch tab, navigate away, or close the source page | Bookmark is marked after at least five seconds without another edit or matching selected page |
+| Same page selected in a second window | Protection continues until no window has that page selected, including windows without focus |
+| Ordinary URL and special-domain wrapper URL | Both preserve editing, then migrate to the current scheme |
+| Pause and resume while the source page is selected | URL stays clean until the page is no longer selected and the settling interval completes |
+
+For a cold-worker case, save a bookmark and leave its page selected. Close the
+worker inspector, wait at least 60 seconds, and confirm the worker is inactive.
+Wake it with another browser event while the source page remains selected;
+restored pending work must leave the URL clean. Then switch/navigate/close the
+source and verify marking after the settling interval. Repeat using a bookmark
+created while the worker was already inactive.
+
+Also save a bookmark while its page stays selected, then quit and restart the
+disposable browser. Session storage is cleared on browser restart. The fresh
+session scan must rediscover that clean bookmark, keep it clean while selected,
+and mark it after leaving the page and the settling interval. Test extension
+disable/re-enable in the disposable profile as a second session-reset case.
+
+Repeat save/edit/folder/remove trials with fresh URLs at least 20 times, across
+two windows and with both warm and sleeping workers. After marking, verify
+ordinary clicks still open exactly one new tab and preserve the source page.
+Record observed native results separately from automated regression results.
 
 ## Failure and Rollback
 

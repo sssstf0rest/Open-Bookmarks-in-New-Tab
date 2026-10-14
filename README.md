@@ -46,7 +46,7 @@ The background worker is organized into focused scripts under `js/worker/`. See 
 - **Tab placement** — Open tabs at the end of the source window's tab bar or immediately to the right
 - **Blank-tab reuse** — Avoid unnecessary extra tabs when opening a bookmark from an empty page
 - **Native background opening** — Preserve background behavior for native bookmark tabs opened with Cmd/Ctrl-click or middle-click
-- **Automatic bookmark maintenance** — Mark new and edited bookmarks, with an editing delay to preserve save-dialog renaming
+- **Automatic bookmark maintenance** — Mark new and edited bookmarks after leaving their page, preserving Chrome's save-dialog rename and folder selection
 - **Bilingual popup** — Compact, dark-themed settings in English and Chinese
 
 ### Manual (Developer Mode)
@@ -81,7 +81,7 @@ See [Repository Guidelines](AGENTS.md) and [Testing](docs/testing.md) for contri
 - **Special-domain wrappers and favicons** — Gmail, Outlook, and other configured domains use a GitHub Pages wrapper to handle browsers stripping the `newtab@` marker. Their favicons may differ from the destination site's icon. Working interception handles the request locally; if the helper page loads as a fallback, its URL includes the encoded bookmark destination and is sent to the hosting service.
 - **Non-HTTP(S) bookmarks** — URLs such as `chrome://`, `edge://`, `about:`, and `file://` retain native behavior. HTTP(S) LAN addresses such as `http://192.168.1.1/` are handled as ordinary web bookmarks.
 - **Bookmark URLs are modified** — Markers are visible in bookmark properties and may sync through Chrome. Pause in the popup before disabling or uninstalling to restore them.
-- **New-bookmark editing delay** — Newly created bookmarks remain unmarked for about five seconds after their last edit, so clicking them during that interval may use native same-tab behavior.
+- **Bookmark editing protection** — New and edited bookmarks remain unmarked while a matching page is selected in any window. After switching tabs, navigating away, or closing that page, marking waits about five seconds. Chrome exposes no save-dialog close event, so closing the dialog alone may leave the bookmark using native same-tab behavior until you leave the page. See the [folder-selector investigation](docs/bookmark-folder-selector.md).
 - **Browser-specific compatibility** — Cold starts, folder opening, incognito, and media playback should be checked on each supported platform. If the `cancel.html` warning page becomes visible, the worker did not supply the expected 204 response; pause and report the browser version and reproduction steps.
 
 ## Permissions
@@ -90,7 +90,7 @@ See [Repository Guidelines](AGENTS.md) and [Testing](docs/testing.md) for contri
 |---|---|
 | `bookmarks` | Read, mark, migrate, and restore bookmark URLs |
 | `tabs` | Read the exact source tab and open/reuse destination tabs with the requested focus and placement |
-| `storage` | Store preferences in Chrome sync storage and pending bookmark IDs in session storage |
+| `storage` | Store preferences in Chrome sync storage and pending bookmark IDs/original URLs in session storage |
 | `declarativeNetRequest` | Redirect marked main-frame requests to the local 204 endpoint |
 | `webNavigation` | Detect marked navigations and correlate commits or cancellations with their source tabs |
 | `<all_urls>` (host) | Allow redirect rules to handle HTTP(S) bookmarks across websites |

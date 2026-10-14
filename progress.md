@@ -1,4 +1,18 @@
-# Cleanup Progress
+# Bookmark Folder Selector Progress
+
+## 2026-10-12 — Investigation and repair
+
+- Read planning skill and repository guidance; session catchup has no additional context and initial working tree is clean.
+- Inspected background registration, bookmark listeners, pending timers, lifecycle startup, manifest, and historical planning records.
+- Delegated primary-source Chromium dialog research and an independent bookmark/test audit while tracing the implementation.
+- Confirmed the original-URL lookup in Chromium's editor-opening and edit-saving paths. Audit also found recovery loses pending IDs early and async work can overwrite a later edit/pause.
+- Delegated behavior-based queue regression tests and evidence-backed diagnosis/manual test documentation. Implementing the shared guarded queue in the worker.
+- Added a shared timer, active-page guard, original-URL hints, complete queue recovery, event-driven retries, own-write filtering, and pause cancellation. Source validation passes. Existing 26 tests pass; new harness initially omitted onMoved and is being corrected.
+- All 50 tests pass after harness correction and 24 bookmark regressions. Review fixed cold-start removal, optimized timer scheduling, and identified loading-event stale snapshots; a regression for the last case is being added.
+- Updated README/architecture, a focused Chromium-backed investigation, native acceptance guide, and privacy-policy source. Native attempt could not target the isolated Chrome instance safely; no personal bookmark/UI changes made.
+- Added loading-event invalidation and the 2,000-bookmark burst regression. Added once-per-session reconciliation with readiness persisted only after the complete tree is queued, covering browser restart and extension reload/disable. Ordinary worker wakeups retain the cheaper pending recovery path.
+- Final verification: all 57 tests pass, npm run check passes, npm run build packages 17 allowlisted runtime files, and git diff --check passes. Two independent audits completed; no remaining actionable findings. Terminated only the isolated Chrome test process; native verification remains pending in the documented disposable-profile guide.
+- Investigation and supported-cause repair complete locally. Version/204 registration/hosted helper unchanged. No commit, push, policy deployment, or release publication.
 
 ## 2026-09-13 — Pages queue diagnosis
 - Inspected screenshot, Actions API, Pages source configuration and GitHub status. Latest run is queued, previous run succeeded. No remote writes or workflow cancellation performed.

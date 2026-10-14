@@ -45,6 +45,7 @@ function harness(options = {}) {
     },
     bookmarks: {
       onCreated: event("bookmarkCreated"), onChanged: event("bookmarkChanged"),
+      onMoved: event("bookmarkMoved"), onRemoved: event("bookmarkRemoved"),
       getTree: async () => options.tree || [],
       get: async () => [],
       update: async (id, props) => calls.bookmarks.push([id, plain(props)]),
@@ -58,6 +59,7 @@ function harness(options = {}) {
       onErrorOccurred: event("error"),
     },
     tabs: {
+      query: async () => [...tabs.values()].filter((tab) => tab.active),
       get: async (id) => {
         if (options.getTab) return options.getTab(id, tabs);
         if (!tabs.has(id)) throw new Error("Tab closed");
@@ -77,7 +79,8 @@ function harness(options = {}) {
         if (options.backFails) throw new Error("No history");
       },
       onRemoved: event("removed"),
-      // Intentionally no remove/query/downloads/alarms APIs: using them fails.
+      onActivated: event("activated"), onUpdated: event("updated"),
+      // Intentionally no remove/downloads/alarms APIs: using them fails.
     },
   };
   const context = vm.createContext({

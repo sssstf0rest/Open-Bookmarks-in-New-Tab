@@ -19,6 +19,8 @@ async function enableExtension() {
  * disables the redirect rule.
  */
 async function disableExtension() {
+  await pendingMarksReady;
+  await cancelPendingBookmarkMarks();
   // Remove prefix from all bookmarks first (so they work normally)
   await unprefixAllBookmarks();
 
@@ -171,8 +173,14 @@ async function init() {
     markSettingsReady();
   }
 
-  // Mark anything whose settle timer died with the previous worker.
+  // Re-arm pending work; startup is not evidence that the save bubble closed.
   await drainPendingBookmarkMarks();
+
+  try {
+    await reconcileBookmarkSession();
+  } catch (err) {
+    console.warn("[Bookmarks→NewTab] Could not reconcile bookmark session:", err);
+  }
 
   // Make sure the redirect rule matches the stored enabled state. Cheap (one
   // read, a write only on drift). Navigation can already be in flight here;

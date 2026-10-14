@@ -1,4 +1,19 @@
-# Repository Cleanup Findings
+# Bookmark Folder Selector Findings
+
+## Active investigation — 2026-10-12
+
+- Working tree starts clean. Extension is Manifest V3 with no content scripts; native Chrome UI is not manipulated directly.
+- New bookmarks are rewritten after five seconds without changes. Startup immediately drains persisted pending IDs. Existing URL edits are rewritten immediately.
+- Current comments already explain that the save bubble looks up the bookmark by page URL. The fixed delay cannot guarantee the bubble has closed, and startup bypasses even that delay.
+- Report is user-supplied evidence; the precise persistent freeze and Incognito comparison have not been independently reproduced. Investigating the URL-lookup race separately from the report's UI-thread deadlock theory.
+- Chromium's `BookmarkBubbleView::ShowEditor()` and `ApplyEdits()` look up the node by the original page URL; the last folder-combobox choice calls `ShowEditor()`. After our rewrite, the lookup can return null, suppressing the folder editor and edits. This supports a URL identity race, not a proven UI-thread deadlock.
+- Chromium closes the bubble on tab deactivation/detachment. Chrome's public bookmark API exposes no bubble-close event. Conservative repair: defer all enabled-time URL writes while a matching page is selected in any window; retry after tab activity and another settle interval. Closing the bubble alone cannot be detected, so fresh bookmarks may remain unmarked until the page is left.
+- Existing title/URL events do not cover folder movement. Queue recovery also loses persisted remaining IDs by clearing before processing. Repair will restore the full queue, retain original URL hints, handle folder moves/removals, and invalidate stale asynchronous work.
+- Primary references: https://raw.githubusercontent.com/chromium/chromium/10ea04ff21714a3d35ec61364847890aacccde4e/chrome/browser/ui/views/bookmarks/bookmark_bubble_view.cc ; https://developer.chrome.com/docs/extensions/reference/api/bookmarks ; https://developer.chrome.com/docs/extensions/reference/api/tabs .
+- Independent reviews found and fixed cold-start removal overwriting recovered work, quadratic timer rearming, and navigation-start invalidation of an active-tab snapshot. Own writes are filtered by their expected URL, while external edits invalidate old reads.
+- Pending records now include original URLs; README and the local privacy-policy source describe this accurately. No hosted-policy deployment is performed.
+- Native attempt: isolated Chrome 154.0.8037.98 started successfully, but CUA selected the existing personal instance. No native bookmark actions performed; exact native behavior remains unverified.
+- Final review: Chrome clears session storage on browser restart/extension disable. Since selected-page deferral can now last indefinitely, a once-per-fresh-session guarded tree scan must rediscover clean bookmarks. A readiness flag is persisted only after the full scan is queued; normal worker wakeups recover pending work without rescanning.
 
 ## Pages queue investigation — 2026-09-13
 - Latest Pages workflow 34713882106 is queued at cde81752d0a5a802050c9aabe9c2bc1ecc131049, created 2026-09-12 19:20:19 UTC. Prior run 34712194807 succeeded at c512f280ecec0e3e47afa5e8e2c2510bbecfb8d3.

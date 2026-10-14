@@ -223,7 +223,7 @@
 
     <p class="meta">
       <strong>Open Bookmarks in New Tab</strong> &mdash; Chrome Extension<br />
-      Last updated: September 12, 2026
+      Last updated: October 12, 2026
     </p>
 
     <!-- ── 1. Overview ──────────────────────────────────────────────── -->
@@ -245,8 +245,9 @@
     <p>
       Preferences (enabled/disabled state, tab focus, position, and popup
       language) use <code>chrome.storage.sync</code> and may sync through
-      Chrome according to your browser settings. IDs of bookmarks awaiting
-      delayed marking use <code>chrome.storage.session</code>. Modified
+      Chrome according to your browser settings. IDs and original URLs of
+      bookmarks awaiting delayed marking use <code>chrome.storage.session</code>
+      to protect native bookmark editing and recover pending work. Modified
       bookmark URLs may also sync through Chrome's bookmark synchronization.
     </p>
 
@@ -314,8 +315,9 @@
             <code>chrome.storage.sync</code>, which Chrome may sync
             between signed-in devices. Stored settings
             include: enabled/disabled state, focus preference, and
-            tab position and popup language. Pending bookmark IDs use
-            <code>chrome.storage.session</code> for worker recovery.
+            tab position and popup language. Pending bookmark IDs and
+            original URLs use <code>chrome.storage.session</code> for
+            native editing protection and worker recovery.
           </td>
         </tr>
         <tr>

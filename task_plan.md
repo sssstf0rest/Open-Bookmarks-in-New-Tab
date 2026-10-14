@@ -1,4 +1,25 @@
-# Task Plan: Repository Cleanup
+# Task Plan: Bookmark Folder Selector Investigation
+
+## Active investigation — 2026-10-12
+
+Goal: assess the reported native Chrome folder selector failure, fix supported extension causes, and distinguish automated evidence from native-browser verification.
+
+- [x] Trace bookmark mutations and confirm Chromium dialog behavior from primary sources.
+- [x] Implement a bounded, restart-safe repair preserving URL migration and synchronous worker registration.
+- [x] Add regression coverage and native-dialog reproduction instructions.
+- [x] Run check, tests, build, and whitespace validation; review and report limitations.
+
+Constraints: preserve the HTML-typed 204 response, hosted helper URL, existing migration, and version. Use a disposable profile for any browser writes; no publication or personal bookmark mutations.
+
+Decision: replace time-only marking with a shared, session-backed queue protected by matching active tabs in every window. Re-arm recovered work; preserve original URL hints and invalidate stale async work. Native dialog closure has no public API, so document the delay until leaving the page.
+
+## Current investigation errors
+- First combined test run: 26 existing tests passed; 19 new tests failed because their harness omitted the new `bookmarks.onMoved` event. Corrected; final 57 tests pass.
+- Native verification attempt could not safely target the isolated Chrome process; no bookmark actions were performed. Test process terminated; native persistent freeze remains unverified.
+
+## Active investigation outcome
+
+Supported URL-identity race repaired locally. All 57 tests pass (31 bookmark regressions plus 26 existing tests); check, build (17 runtime assets), and whitespace validation pass. Independent review has no remaining actionable findings. Native acceptance steps are documented, but not claimed as observed. Newly saved bookmarks remain unmarked while a matching page is selected; leaving it triggers guarded marking after five seconds. No version bump, commit, push, or publication.
 
 ## Active Pages diagnosis — 2026-09-13
 - [x] Inspect stalled workflow and preceding successful deployment.
