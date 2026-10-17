@@ -1,5 +1,20 @@
 # Task Plan: Bookmark Folder Selector Investigation
 
+## Active update packaging — 2026-10-15
+
+Create a Chrome Web Store upload ZIP from the current source. Manifest already
+uses 2.6.0; preserve it and align package.json from 2.5.0.
+- [x] Confirm runtime boundary, align metadata, and run project checks/tests.
+- [x] Build and ZIP only allowlisted runtime assets with manifest.json at root.
+- [x] Verify ZIP integrity, exact contents, source equality, and version; deliver path.
+
+Output: dist/Open-Bookmarks-in-New-Tab-v2.6.0.zip, 17 runtime files,
+23,359 bytes. Check, all 57 tests, build, ZIP CRC/exact contents/source equality,
+and whitespace checks pass. Native UI verification remains as previously documented.
+
+Local packaging is authorized. Preserve current runtime implementation; no upload,
+publication, source commit, or additional version bump is requested.
+
 ## Active investigation — 2026-10-12
 
 Goal: assess the reported native Chrome folder selector failure, fix supported extension causes, and distinguish automated evidence from native-browser verification.

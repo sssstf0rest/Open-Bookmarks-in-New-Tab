@@ -1,5 +1,13 @@
 # Bookmark Folder Selector Findings
 
+## Update packaging — 2026-10-15
+
+- Working tree starts clean. Manifest version is already 2.6.0; development package metadata remains 2.5.0. Align metadata without changing the existing manifest version.
+- Runtime allowlist remains 17 files; exclude docs, tests, scripts, planning notes, generated metadata, and other development artifacts. Keep manifest.json at the ZIP root.
+- Independent audit confirms all local runtime dependencies are included and the bookmark fix is present. Official packaging/update guidance: https://developer.chrome.com/docs/webstore/prepare and https://developer.chrome.com/docs/webstore/update .
+- Created dist/Open-Bookmarks-in-New-Tab-v2.6.0.zip: exactly 17 runtime files, 23,359 bytes, root manifest version 2.6.0. ZIP CRC and byte equality with build/source pass.
+- SHA-256: 1a765d672b04059b025d28884fd931cd154049aeb375758b7720464ae7fdbfa1.
+
 ## Active investigation — 2026-10-12
 
 - Working tree starts clean. Extension is Manifest V3 with no content scripts; native Chrome UI is not manipulated directly.

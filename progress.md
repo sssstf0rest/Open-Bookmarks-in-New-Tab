@@ -1,5 +1,10 @@
 # Bookmark Folder Selector Progress
 
+## 2026-10-15 — Chrome Web Store update package
+
+- Inspected clean working tree, current manifest, package metadata, runtime allowlist, and build script. Manifest already 2.6.0; preserving it. Delegated an independent packaging-boundary audit.
+- Aligned package.json to 2.6.0; check and all 57 tests pass. Built 17 runtime assets and created the 23,359-byte v2.6.0 ZIP. Verified CRC, exact allowlist, manifest at archive root, and byte equality against both source and build. No upload, publication, or commit performed.
+
 ## 2026-10-12 — Investigation and repair
 
 - Read planning skill and repository guidance; session catchup has no additional context and initial working tree is clean.
